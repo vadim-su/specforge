@@ -1,0 +1,1 @@
+I want a todo app with decorative touches and beautiful animations. It should allow users to create tasks, mark them as completed, and delete them. I’d also like the ability to sort tasks by priority and creation date.
