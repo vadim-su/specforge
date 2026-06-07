@@ -435,6 +435,8 @@ user-selected implementation preferences. Choose commands a developer can run
 from the repository root after code changes.
 
 Rules:
+- Return one or more checks when the project has multiple useful validation
+  steps, such as format, lint, typecheck, test, or build.
 - Return only checks that are relevant to the inferred stack.
 - Prefer standard test commands over broad build commands.
 - Include command arguments as separate array items.
@@ -449,6 +451,10 @@ JSON schema:
     {
       "command": ["cargo", "test", "--color", "never"],
       "timeout_seconds": 120
+    },
+    {
+      "command": ["cargo", "fmt", "--check"],
+      "timeout_seconds": 30
     }
   ]
 }"#

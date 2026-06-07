@@ -102,10 +102,13 @@ infer this config from the project idea and selected preferences:
 
 ```yaml
 checks:
+  - command: ["cargo", "fmt", "--check"]
+    timeout_seconds: 30
   - command: ["cargo", "test", "--color", "never"]
     timeout_seconds: 120
 ```
 
+Configure as many checks as the project needs; SpecForge runs them in order.
 When no checks are configured, project checks are skipped. The agent also
 receives the active check plan before generating patches.
 
