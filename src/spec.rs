@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -149,6 +153,44 @@ pub fn parse_spec(source: &str) -> SpecModel {
         },
         items,
     }
+}
+
+pub fn normalize_missing_anchor_ids(source: &str) -> String {
+    let mut used_ids = source
+        .lines()
+        .filter_map(|line| parse_anchor(line.trim()))
+        .collect::<BTreeSet<_>>();
+    let mut pending_anchor = false;
+    let mut output = Vec::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if parse_anchor(trimmed).is_some() {
+            pending_anchor = true;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if let Some((_, heading)) = parse_heading(trimmed) {
+            if let Some((kind, title)) = parse_heading_kind_and_title(&heading)
+                && !pending_anchor
+                && let Some(prefix) = anchor_prefix(&kind)
+            {
+                let id = unique_anchor_id(prefix, &title, &mut used_ids);
+                output.push(format!("[[{id}]]"));
+            }
+            pending_anchor = false;
+        }
+
+        output.push(line.to_string());
+    }
+
+    let mut normalized = output.join("\n");
+    if source.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 pub fn validate_model(model: &SpecModel) -> Vec<Diagnostic> {
@@ -418,6 +460,65 @@ fn hash_text(text: &str) -> String {
     format!("sha256:{digest:x}")
 }
 
+fn anchor_prefix(kind: &SpecKind) -> Option<&'static str> {
+    match kind {
+        SpecKind::Project => None,
+        SpecKind::Feature => Some("feat."),
+        SpecKind::Entity => Some("entity."),
+        SpecKind::Command => Some("cmd."),
+        SpecKind::Flow => Some("flow."),
+        SpecKind::Acceptance => Some("acc."),
+        SpecKind::Constraint => Some("constraint."),
+        SpecKind::Decision => Some("decision."),
+        SpecKind::Glossary => Some("glossary."),
+        SpecKind::Term => Some("term."),
+        SpecKind::Unknown => None,
+    }
+}
+
+fn unique_anchor_id(prefix: &str, title: &str, used_ids: &mut BTreeSet<String>) -> String {
+    let slug = slugify_anchor_title(title);
+    let base = format!("{prefix}{slug}");
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+
+    while used_ids.contains(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+
+    used_ids.insert(candidate.clone());
+    candidate
+}
+
+fn slugify_anchor_title(title: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for ch in title.trim().chars() {
+        let mut pushed_alphanumeric = false;
+        for lower in ch.to_lowercase() {
+            if lower.is_alphanumeric() {
+                slug.push(lower);
+                pushed_alphanumeric = true;
+                last_was_separator = false;
+            }
+        }
+
+        if !pushed_alphanumeric && !slug.is_empty() && !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "section".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
 fn expected_prefix(kind: &SpecKind) -> Option<&'static str> {
     match kind {
         SpecKind::Project => None,
@@ -506,6 +607,56 @@ The user can manage customers.
                     .message
                     .contains("section must have an anchor id")
         }));
+    }
+
+    #[test]
+    fn normalizes_missing_anchor_ids_for_typed_sections() {
+        let source = r#"= Test Spec
+:project-id: test
+
+== Project
+
+Name:: Scratch cards
+
+== Feature: Соскребаемые карточки
+
+==== Acceptance: Открытие скрытого содержимого
+
+== Entity: Card
+"#;
+
+        let normalized = normalize_missing_anchor_ids(source);
+
+        assert!(
+            normalized
+                .contains("[[feat.соскребаемые-карточки]]\n== Feature: Соскребаемые карточки")
+        );
+        assert!(normalized.contains(
+            "[[acc.открытие-скрытого-содержимого]]\n==== Acceptance: Открытие скрытого содержимого"
+        ));
+        assert!(normalized.contains("[[entity.card]]\n== Entity: Card"));
+        assert!(validate_model(&parse_spec(&normalized)).is_empty());
+    }
+
+    #[test]
+    fn normalizes_missing_anchor_ids_without_colliding_with_existing_ids() {
+        let source = r#"= Test Spec
+
+[[feat.customer-management]]
+== Feature: Customer management
+
+== Feature: Customer management
+"#;
+
+        let normalized = normalize_missing_anchor_ids(source);
+
+        assert!(
+            normalized.contains("[[feat.customer-management]]\n== Feature: Customer management")
+        );
+        assert!(
+            normalized.contains("[[feat.customer-management-2]]\n== Feature: Customer management")
+        );
+        assert!(validate_model(&parse_spec(&normalized)).is_empty());
     }
 
     #[test]
