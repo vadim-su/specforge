@@ -82,6 +82,9 @@ pub enum Command {
     },
     /// Apply an ad-hoc code fix or update that is not part of the spec.
     Fix {
+        /// Image attachment for the request. Use '-' to read one image from stdin.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<PathBuf>,
         /// Change request. If omitted, fix reads stdin when piped.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         request: Vec<String>,
@@ -169,4 +172,48 @@ pub enum TestCommand {
         #[arg(long)]
         no_tui: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fix_image_before_request() {
+        let cli = Cli::try_parse_from([
+            "specforge",
+            "fix",
+            "--image",
+            "screenshot.png",
+            "fix",
+            "this",
+        ])
+        .unwrap();
+
+        let Command::Fix {
+            images, request, ..
+        } = cli.command
+        else {
+            panic!("expected fix command");
+        };
+
+        assert_eq!(images, vec![PathBuf::from("screenshot.png")]);
+        assert_eq!(request, vec!["fix".to_string(), "this".to_string()]);
+    }
+
+    #[test]
+    fn parses_fix_image_from_stdin_marker() {
+        let cli =
+            Cli::try_parse_from(["specforge", "fix", "--image", "-", "fix screenshot"]).unwrap();
+
+        let Command::Fix {
+            images, request, ..
+        } = cli.command
+        else {
+            panic!("expected fix command");
+        };
+
+        assert_eq!(images, vec![PathBuf::from("-")]);
+        assert_eq!(request, vec!["fix screenshot".to_string()]);
+    }
 }

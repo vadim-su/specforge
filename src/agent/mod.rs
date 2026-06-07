@@ -5,7 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rig::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
+use base64::{Engine, prelude::BASE64_STANDARD};
+use rig::{
+    OneOrMany,
+    message::{AssistantContent, ImageMediaType, Message, ToolCall, ToolResult, UserContent},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -56,6 +60,13 @@ pub struct DevelopmentAgentRun {
     pub task_dir: PathBuf,
     pub final_answer: String,
     pub checklist: Vec<TaskChecklistItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    pub name: String,
+    pub media_type: ImageMediaType,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -403,18 +414,21 @@ pub async fn resume_pending_development_task_with_events(
 
 pub async fn run_code_change_agent(
     request: &str,
+    images: &[ImageAttachment],
     options: DevelopmentAgentOptions,
 ) -> Result<DevelopmentAgentRun> {
-    run_code_change_agent_with_events(request, options, |_| {}).await
+    run_code_change_agent_with_events(request, images, options, |_| {}).await
 }
 
 pub async fn run_code_change_agent_with_events(
     request: &str,
+    images: &[ImageAttachment],
     options: DevelopmentAgentOptions,
     mut events: impl FnMut(DevelopmentAgentEvent),
 ) -> Result<DevelopmentAgentRun> {
     run_code_change_task_with_events(
         request,
+        images,
         options,
         TaskKind::CodeChange,
         "fix",
@@ -439,6 +453,7 @@ pub async fn run_test_coverage_agent_with_events(
 ) -> Result<DevelopmentAgentRun> {
     run_code_change_task_with_events(
         request,
+        &[],
         options,
         TaskKind::TestCoverage,
         "test-cover",
@@ -451,6 +466,7 @@ pub async fn run_test_coverage_agent_with_events(
 
 async fn run_code_change_task_with_events(
     request: &str,
+    images: &[ImageAttachment],
     options: DevelopmentAgentOptions,
     task_kind: TaskKind,
     task_prefix: &str,
@@ -459,7 +475,7 @@ async fn run_code_change_task_with_events(
     events: &mut impl FnMut(DevelopmentAgentEvent),
 ) -> Result<DevelopmentAgentRun> {
     let request = request.trim();
-    if request.is_empty() {
+    if request.is_empty() && images.is_empty() {
         bail!("{task_label} request must not be empty");
     }
 
@@ -473,7 +489,8 @@ async fn run_code_change_task_with_events(
         max_tokens: None,
         tools: code_change_tools(),
     })?;
-    let request_hash = short_hash(request);
+    let image_hashes = images.iter().map(image_hash).collect::<Vec<_>>();
+    let request_hash = short_hash(&format!("{}\n{}", request, image_hashes.join("\n")));
     let task_id = timestamped_task_id(task_prefix, &request_hash)?;
     let task_dir = Path::new(TASKS_DIR).join(&task_id);
     fs::create_dir_all(&task_dir)
@@ -494,10 +511,11 @@ async fn run_code_change_task_with_events(
         allowed_paths,
     );
     let mut thread = AgentThread {
-        messages: vec![Message::user(code_change_user_message(request)?)],
+        messages: vec![code_change_user_message(request, images)?],
     };
 
     write_task_state(&task_dir, &state)?;
+    persist_image_attachments(&task_dir, images)?;
     fs::write(
         task_dir.join("request.md"),
         ensure_trailing_newline(request),
@@ -892,13 +910,97 @@ fn finish_task(
     Ok(())
 }
 
-fn code_change_user_message(request: &str) -> Result<String> {
+fn code_change_user_message(request: &str, images: &[ImageAttachment]) -> Result<Message> {
+    let mut content = vec![UserContent::text(code_change_user_message_text(request)?)];
+    for image in images {
+        content.push(UserContent::image_base64(
+            BASE64_STANDARD.encode(&image.bytes),
+            Some(image.media_type.clone()),
+            None,
+        ));
+    }
+
+    Ok(Message::User {
+        content: OneOrMany::many(content).context("code change user message must not be empty")?,
+    })
+}
+
+fn code_change_user_message_text(request: &str) -> Result<String> {
     let check_plan = project_check_plan()?;
     Ok(format!(
         "Apply this ad-hoc code change request. Inspect the repository before making repo-specific claims. Prepare a concise verification plan before proposing patches.\n\n<user-request>\n{}\n</user-request>\n\n<project-check-plan>\n{}\n</project-check-plan>",
         request.trim(),
         serde_json::to_string_pretty(&check_plan)?
     ))
+}
+
+#[derive(Debug, Serialize)]
+struct ImageAttachmentManifestItem<'a> {
+    name: &'a str,
+    file: String,
+    media_type: &'a ImageMediaType,
+    size_bytes: usize,
+    sha256: String,
+}
+
+fn persist_image_attachments(task_dir: &Path, images: &[ImageAttachment]) -> Result<()> {
+    if images.is_empty() {
+        return Ok(());
+    }
+
+    let attachments_dir = task_dir.join("attachments");
+    fs::create_dir_all(&attachments_dir)
+        .with_context(|| format!("failed to create {}", attachments_dir.display()))?;
+
+    let mut manifest = Vec::new();
+    for (index, image) in images.iter().enumerate() {
+        let file_name = format!("image-{}.{}", index + 1, image_extension(&image.media_type));
+        let path = attachments_dir.join(&file_name);
+        fs::write(&path, &image.bytes)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        manifest.push(ImageAttachmentManifestItem {
+            name: &image.name,
+            file: format!("attachments/{file_name}"),
+            media_type: &image.media_type,
+            size_bytes: image.bytes.len(),
+            sha256: image_hash(image),
+        });
+    }
+
+    fs::write(
+        task_dir.join("attachments.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            task_dir.join("attachments.json").display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn image_hash(image: &ImageAttachment) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(&image.bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn image_extension(media_type: &ImageMediaType) -> &'static str {
+    match media_type {
+        ImageMediaType::JPEG => "jpg",
+        ImageMediaType::PNG => "png",
+        ImageMediaType::GIF => "gif",
+        ImageMediaType::WEBP => "webp",
+        ImageMediaType::HEIC => "heic",
+        ImageMediaType::HEIF => "heif",
+        ImageMediaType::SVG => "svg",
+    }
 }
 
 fn initial_user_message(target: &ParsedSpec, diff: &Value) -> Result<String> {

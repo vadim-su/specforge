@@ -7071,6 +7071,7 @@ name = "specforge"
 version = "0.1.0-pre"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "clap_complete",
  "ratatui",

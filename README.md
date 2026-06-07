@@ -115,6 +115,15 @@ specforge test cover --file src/sync.rs
 specforge test cover --item feature-sync
 ```
 
+Apply an ad-hoc code change from text and optional screenshots:
+
+```sh
+specforge fix "Add input validation to the sync flow"
+specforge fix --image screenshot.png "Fix the broken UI state shown here"
+wl-paste --type image/png | specforge fix --image - "Fix the UI state in this screenshot"
+pngpaste - | specforge fix --image - "Fix the UI state in this screenshot"
+```
+
 Answer targeted questions in a terminal questionnaire and get conclusions for
 expanding a spec:
 
@@ -188,7 +197,7 @@ specforge sync [SPEC] [--yes] [--skip-agent]
 specforge test run
 specforge test cover [TARGET...] [--file PATH] [--item ID_OR_TITLE] [--spec spec.adoc]
 specforge assist expand [SPEC]
-specforge fix [REQUEST...]
+specforge fix [--image PATH] [REQUEST...]
 specforge completions <SHELL>
 specforge accept [SPEC]
 ```

@@ -229,6 +229,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fix {
             request,
+            images,
             agent_steps,
             provider,
             model,
@@ -250,9 +251,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            let request = read_fix_request(&request)?;
+            let attachments = read_image_attachments(&images)?;
+            let request = read_fix_request(&request, !attachments.is_empty())?;
             let run = run_code_change_agent_with_progress(
                 &request,
+                &attachments,
                 DevelopmentAgentOptions {
                     provider,
                     model,
@@ -505,16 +508,17 @@ async fn run_development_agent_with_progress(
 
 async fn run_code_change_agent_with_progress(
     request: &str,
+    images: &[specforge::agent::ImageAttachment],
     options: DevelopmentAgentOptions,
     no_tui: bool,
 ) -> Result<DevelopmentAgentRun> {
     if !should_use_tui(no_tui) {
-        return run_code_change_agent(request, options).await;
+        return run_code_change_agent(request, images, options).await;
     }
 
     run_with_tui("SpecForge fix", |progress| async move {
         progress.log("Starting code change agent");
-        run_code_change_agent_with_events(request, options, |event| {
+        run_code_change_agent_with_events(request, images, options, |event| {
             progress.agent_event(event);
         })
         .await
@@ -545,10 +549,16 @@ fn should_use_tui(no_tui: bool) -> bool {
     !no_tui && io::stdout().is_terminal()
 }
 
-fn read_fix_request(parts: &[String]) -> Result<String> {
+fn read_fix_request(parts: &[String], has_images: bool) -> Result<String> {
     let request = parts.join(" ");
     if !request.trim().is_empty() {
         return Ok(request);
+    }
+
+    if has_images {
+        return Ok(
+            "Analyze the attached screenshot(s) and apply the necessary code fix.".to_string(),
+        );
     }
 
     if io::stdin().is_terminal() {
@@ -565,6 +575,77 @@ fn read_fix_request(parts: &[String]) -> Result<String> {
     }
 
     Ok(request)
+}
+
+fn read_image_attachments(paths: &[PathBuf]) -> Result<Vec<specforge::agent::ImageAttachment>> {
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| read_image_attachment(index + 1, path))
+        .collect()
+}
+
+fn read_image_attachment(index: usize, path: &Path) -> Result<specforge::agent::ImageAttachment> {
+    let (name, bytes) = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .context("failed to read image attachment from stdin")?;
+        if bytes.is_empty() {
+            bail!("image attachment from stdin is empty");
+        }
+        (format!("stdin-image-{index}"), bytes)
+    } else {
+        let bytes = fs::read(path)
+            .with_context(|| format!("failed to read image attachment {}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        (name, bytes)
+    };
+    let media_type = image_media_type(path, &bytes)?;
+
+    Ok(specforge::agent::ImageAttachment {
+        name,
+        media_type,
+        bytes,
+    })
+}
+
+fn image_media_type(path: &Path, bytes: &[u8]) -> Result<rig::message::ImageMediaType> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok(rig::message::ImageMediaType::PNG);
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Ok(rig::message::ImageMediaType::JPEG);
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Ok(rig::message::ImageMediaType::GIF);
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Ok(rig::message::ImageMediaType::WEBP);
+    }
+
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Ok(rig::message::ImageMediaType::PNG),
+        Some("jpg" | "jpeg") => Ok(rig::message::ImageMediaType::JPEG),
+        Some("gif") => Ok(rig::message::ImageMediaType::GIF),
+        Some("webp") => Ok(rig::message::ImageMediaType::WEBP),
+        Some("heic") => Ok(rig::message::ImageMediaType::HEIC),
+        Some("heif") => Ok(rig::message::ImageMediaType::HEIF),
+        Some("svg") => Ok(rig::message::ImageMediaType::SVG),
+        _ => bail!(
+            "unsupported image attachment {}; expected PNG, JPEG, GIF, WEBP, HEIC, HEIF, or SVG",
+            path.display()
+        ),
+    }
 }
 
 fn build_test_coverage_request(
