@@ -14,6 +14,7 @@ use specforge::{
         run_code_change_agent_with_events, run_development_agent,
         run_development_agent_with_events,
     },
+    assist::{AssistExpandOptions, expand_spec},
     config::{CURRENT_MODEL, CURRENT_SPEC},
     diff::{diff_models, locate_diff_changes},
     init::{InitOptions, init_spec},
@@ -23,7 +24,7 @@ use specforge::{
 };
 
 use crate::cli::{
-    args::{Cli, Command},
+    args::{AssistCommand, Cli, Command},
     color::Colors,
     diff_render::{print_diff, print_text_diff},
     tui::run_with_tui,
@@ -254,6 +255,25 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await?;
             print_agent_run("code change task", &run);
         }
+        Command::Assist { command } => match command {
+            AssistCommand::Expand {
+                spec,
+                focus,
+                provider,
+                model,
+                no_tui,
+            } => {
+                let response = expand_spec(AssistExpandOptions {
+                    spec,
+                    focus,
+                    provider,
+                    model,
+                    no_tui,
+                })
+                .await?;
+                println!("{}", response.trim());
+            }
+        },
         Command::Accept { spec } => {
             let parsed = parse_spec_file(&spec)?;
             let diagnostics = validate_model(&parsed.model);

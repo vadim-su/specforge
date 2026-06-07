@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agents;
+pub mod assist;
 pub mod config;
 pub mod diff;
 pub mod init;

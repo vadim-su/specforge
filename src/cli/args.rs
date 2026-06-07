@@ -96,9 +96,34 @@ pub enum Command {
         #[arg(long)]
         no_tui: bool,
     },
+    /// Ask an LLM for questions that can improve a spec and project direction.
+    Assist {
+        #[command(subcommand)]
+        command: AssistCommand,
+    },
     /// Store the spec as the current state for future diffs.
     Accept {
         #[arg(default_value = DEFAULT_SPEC)]
         spec: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AssistCommand {
+    /// Expand a spec by asking targeted product and implementation questions.
+    Expand {
+        #[arg(default_value = DEFAULT_SPEC)]
+        spec: PathBuf,
+        /// Optional area to focus the questions on.
+        #[arg(long)]
+        focus: Option<String>,
+        #[arg(long, default_value_t = Provider::Openai)]
+        provider: Provider,
+        /// Provider model name. Defaults depend on --provider.
+        #[arg(long)]
+        model: Option<String>,
+        /// Print generated questions instead of opening the ratatui questionnaire.
+        #[arg(long)]
+        no_tui: bool,
     },
 }

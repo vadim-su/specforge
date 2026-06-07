@@ -16,6 +16,7 @@ and driving implementation work from the accepted changes.
 - Diff the current spec against `.specforge/state/current.adoc`.
 - Normalize spec tags, accept the new state, and optionally run the development
   agent for the detected changes.
+- Ask for targeted product and engineering questions that can expand a spec.
 - Apply ad-hoc code fixes with the code change agent.
 - Use OpenAI, Anthropic, Ollama, or ChatGPT providers.
 
@@ -69,6 +70,13 @@ Synchronize spec changes and skip agent execution:
 specforge sync spec.adoc --skip-agent
 ```
 
+Answer targeted questions in a terminal questionnaire and get conclusions for
+expanding a spec:
+
+```sh
+specforge assist expand spec.adoc
+```
+
 ## LLM Providers
 
 Commands that call an LLM accept `--provider` and `--model`:
@@ -109,6 +117,7 @@ specforge check [SPEC]
 specforge model [SPEC]
 specforge diff [SPEC]
 specforge sync [SPEC] [--yes] [--skip-agent]
+specforge assist expand [SPEC]
 specforge fix [REQUEST...]
 specforge accept [SPEC]
 ```
