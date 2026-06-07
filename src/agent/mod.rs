@@ -997,6 +997,7 @@ fn build_proposed_patch(
     };
 
     let changes = validate_apply_patch_with_protected_paths(patch, protected_paths)?;
+    validate_patch_file_state(&changes)?;
 
     Ok(ProposedPatch {
         summary,
@@ -1004,6 +1005,21 @@ fn build_proposed_patch(
         changes,
         check: None,
     })
+}
+
+fn validate_patch_file_state(
+    changes: &[patch::PatchFileChange],
+) -> std::result::Result<(), String> {
+    for change in changes {
+        if change.operation == patch::PatchOperation::Add && Path::new(&change.path).exists() {
+            return Err(format!(
+                "cannot add {}; file already exists; use `*** Update File:` for existing files",
+                change.path
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_patch_tool(
@@ -1349,6 +1365,26 @@ mod tests {
                 path: "src/main.rs".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn rejects_add_file_patch_when_file_already_exists() {
+        let changes = vec![PatchFileChange {
+            operation: PatchOperation::Add,
+            path: "Cargo.toml".to_string(),
+        }];
+
+        assert!(validate_patch_file_state(&changes).is_err());
+    }
+
+    #[test]
+    fn allows_add_file_patch_for_new_file() {
+        let changes = vec![PatchFileChange {
+            operation: PatchOperation::Add,
+            path: "src/nonexistent_generated_file_for_test.rs".to_string(),
+        }];
+
+        assert!(validate_patch_file_state(&changes).is_ok());
     }
 
     #[test]
