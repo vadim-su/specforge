@@ -15,7 +15,7 @@ use specforge::{
         run_development_agent_with_events,
     },
     assist::{AssistExpandOptions, expand_spec},
-    config::{CURRENT_MODEL, CURRENT_SPEC},
+    config::{CURRENT_MODEL, CURRENT_SPEC, load_project_config},
     diff::{diff_models, locate_diff_changes},
     init::{InitOptions, init_spec},
     spec::{ParsedSpec, Severity, parse_spec, parse_spec_file, print_diagnostics, validate_model},
@@ -121,6 +121,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     model: model.clone(),
                     max_steps: agent_steps,
                     protected_paths: vec![spec.clone()],
+                    allowed_paths: agent_allowed_paths()?,
                 },
                 no_tui,
             )
@@ -212,6 +213,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         model,
                         max_steps: agent_steps,
                         protected_paths: vec![spec.clone()],
+                        allowed_paths: agent_allowed_paths()?,
                     },
                     no_tui,
                 )
@@ -232,6 +234,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     model: model.clone(),
                     max_steps: agent_steps,
                     protected_paths: Vec::new(),
+                    allowed_paths: agent_allowed_paths()?,
                 },
                 no_tui,
             )
@@ -249,6 +252,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     model,
                     max_steps: agent_steps,
                     protected_paths: Vec::new(),
+                    allowed_paths: agent_allowed_paths()?,
                 },
                 no_tui,
             )
@@ -310,6 +314,10 @@ fn print_agent_run(label: &str, run: &DevelopmentAgentRun) {
     if !run.final_answer.trim().is_empty() {
         println!("{}", run.final_answer.trim());
     }
+}
+
+fn agent_allowed_paths() -> Result<Vec<String>> {
+    Ok(load_project_config()?.file_access.allowed)
 }
 
 async fn resume_development_task_with_progress(

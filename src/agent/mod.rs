@@ -38,6 +38,7 @@ pub struct DevelopmentAgentOptions {
     pub model: Option<String>,
     pub max_steps: Option<usize>,
     pub protected_paths: Vec<PathBuf>,
+    pub allowed_paths: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -171,6 +172,8 @@ struct AgentTaskState {
     max_steps: usize,
     #[serde(default)]
     protected_paths: Vec<String>,
+    #[serde(default)]
+    allowed_paths: Vec<String>,
     status: TaskStatus,
     checklist: Vec<TaskChecklistItem>,
 }
@@ -208,6 +211,7 @@ struct AgentToolContext<'a> {
     target: Option<&'a ParsedSpec>,
     diff: Option<Value>,
     protected_paths: Vec<String>,
+    allowed_paths: Vec<String>,
 }
 
 impl AgentTaskState {
@@ -218,6 +222,7 @@ impl AgentTaskState {
         target_spec_hash: &str,
         max_steps: usize,
         protected_paths: Vec<String>,
+        allowed_paths: Vec<String>,
     ) -> Self {
         Self {
             kind,
@@ -226,6 +231,7 @@ impl AgentTaskState {
             target_spec_hash: target_spec_hash.to_string(),
             max_steps,
             protected_paths,
+            allowed_paths,
             status: TaskStatus::Running,
             checklist: vec![
                 checklist_item("task-created", "Task created"),
@@ -281,6 +287,7 @@ pub async fn run_development_agent_with_events(
 ) -> Result<DevelopmentAgentRun> {
     let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
+    let allowed_paths = normalize_allowed_paths(&options.allowed_paths)?;
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_development_agent".to_string(),
         preamble: prompts::DEVELOPMENT_AGENT_SYSTEM.to_string(),
@@ -297,6 +304,7 @@ pub async fn run_development_agent_with_events(
         target: Some(target),
         diff: Some(diff_value.clone()),
         protected_paths: protected_paths.clone(),
+        allowed_paths: allowed_paths.clone(),
     };
     let mut state = AgentTaskState::new(
         TaskKind::SpecSync,
@@ -305,6 +313,7 @@ pub async fn run_development_agent_with_events(
         &target.model.document.content_hash,
         turn_budget.as_state_value(),
         protected_paths,
+        allowed_paths,
     );
 
     let mut thread = AgentThread {
@@ -415,6 +424,7 @@ pub async fn resume_pending_development_task_with_events(
         target: Some(&target),
         diff: Some(diff),
         protected_paths: state.protected_paths.clone(),
+        allowed_paths: state.allowed_paths.clone(),
     };
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_development_agent".to_string(),
@@ -487,6 +497,7 @@ pub async fn run_code_change_agent_with_events(
 
     let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
+    let allowed_paths = normalize_allowed_paths(&options.allowed_paths)?;
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_code_change_agent".to_string(),
         preamble: prompts::CODE_CHANGE_AGENT_SYSTEM.to_string(),
@@ -503,6 +514,7 @@ pub async fn run_code_change_agent_with_events(
         target: None,
         diff: None,
         protected_paths: protected_paths.clone(),
+        allowed_paths: allowed_paths.clone(),
     };
     let mut state = AgentTaskState::new(
         TaskKind::CodeChange,
@@ -511,6 +523,7 @@ pub async fn run_code_change_agent_with_events(
         &request_hash,
         turn_budget.as_state_value(),
         protected_paths,
+        allowed_paths,
     );
     let mut thread = AgentThread {
         messages: vec![Message::user(code_change_user_message(request)?)],
@@ -590,6 +603,7 @@ pub async fn resume_pending_code_change_task_with_events(
         target: None,
         diff: None,
         protected_paths: state.protected_paths.clone(),
+        allowed_paths: state.allowed_paths.clone(),
     };
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_code_change_agent".to_string(),
@@ -926,8 +940,10 @@ fn execute_tool(
                 "error": "spec items are not available for this task",
             })),
         },
-        "list_project_files" => list_project_files(call, &context.protected_paths),
-        "inspect_file" => inspect_file(call),
+        "list_project_files" => {
+            list_project_files(call, &context.protected_paths, &context.allowed_paths)
+        }
+        "inspect_file" => inspect_file(call, &context.protected_paths, &context.allowed_paths),
         "propose_patch" => apply_patch_tool(call, task_dir, state, context, patch_history, events),
         other => Ok(json!({
             "ok": false,
@@ -1221,6 +1237,57 @@ fn normalize_protected_path(path: &Path) -> Result<Option<String>> {
     Ok(Some(normalized.to_string_lossy().replace('\\', "/")))
 }
 
+fn normalize_allowed_paths(paths: &[String]) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .filter_map(|path| normalize_allowed_path(path).transpose())
+        .collect()
+}
+
+fn normalize_allowed_path(path: &str) -> Result<Option<String>> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let directory_rule = path.ends_with('/') || path.ends_with("/**");
+    let path = path
+        .strip_suffix("/**")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    let path = Path::new(path);
+
+    if !is_safe_relative_path(path) {
+        bail!(
+            "file_access.allowed path must be relative to the project root: {}",
+            path.display()
+        );
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            _ => bail!(
+                "file_access.allowed path must stay inside the project root: {}",
+                path.display()
+            ),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Ok(None);
+    }
+
+    let mut normalized = normalized.to_string_lossy().replace('\\', "/");
+    if directory_rule || Path::new(&normalized).is_dir() {
+        normalized.push('/');
+    }
+
+    Ok(Some(normalized))
+}
+
 fn is_specforge_owned_path(path: &Path, protected_paths: &[String]) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if protected_paths
@@ -1341,6 +1408,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.kind, TaskKind::SpecSync);
+        assert!(state.allowed_paths.is_empty());
+    }
+
+    #[test]
+    fn normalizes_allowed_file_access_paths() {
+        assert_eq!(
+            normalize_allowed_paths(&[
+                "Cargo.toml".to_string(),
+                "./README.md".to_string(),
+                "src/".to_string(),
+                "examples/**".to_string(),
+            ])
+            .unwrap(),
+            vec![
+                "Cargo.toml".to_string(),
+                "README.md".to_string(),
+                "src/".to_string(),
+                "examples/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_allowed_file_access_paths_that_escape_repo() {
+        assert!(normalize_allowed_paths(&["../secret.txt".to_string()]).is_err());
+        assert!(normalize_allowed_paths(&["/tmp/secret.txt".to_string()]).is_err());
     }
 
     #[test]

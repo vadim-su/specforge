@@ -17,12 +17,20 @@ pub const CURRENT_MODEL: &str = ".specforge/state/current.model.json";
 pub struct ProjectConfig {
     #[serde(default)]
     pub checks: Vec<ProjectCheckConfig>,
+    #[serde(default)]
+    pub file_access: ProjectFileAccessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectCheckConfig {
     pub command: Vec<String>,
     pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectFileAccessConfig {
+    #[serde(default)]
+    pub allowed: Vec<String>,
 }
 
 pub fn load_project_config() -> Result<ProjectConfig> {
@@ -90,6 +98,26 @@ checks:
                 ],
                 timeout_seconds: 120,
             }]
+        );
+    }
+
+    #[test]
+    fn parses_file_access_config() {
+        let config = parse_project_config(
+            r#"
+file_access:
+  allowed:
+    - Cargo.toml
+    - src/
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            config.file_access,
+            ProjectFileAccessConfig {
+                allowed: vec!["Cargo.toml".to_string(), "src/".to_string()],
+            }
         );
     }
 }

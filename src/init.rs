@@ -385,6 +385,7 @@ async fn generate_project_config(
 
     let plan = parse_init_checks_plan(&response)?;
     Ok(ProjectConfig {
+        file_access: Default::default(),
         checks: plan
             .checks
             .into_iter()

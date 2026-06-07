@@ -112,6 +112,26 @@ Configure as many checks as the project needs; SpecForge runs them in order.
 When no checks are configured, project checks are skipped. The agent also
 receives the active check plan before generating patches.
 
+## Agent File Access
+
+By default, the agent file tools can inspect repository files except `.git`,
+`target`, `.specforge`, and SpecForge-owned spec files. To restrict which files
+can be listed or read by the agent, configure `file_access.allowed` in
+`.specforge/config.yaml`:
+
+```yaml
+file_access:
+  allowed:
+    - Cargo.toml
+    - src/
+    - examples/**
+```
+
+An empty or omitted `allowed` list keeps the default unrestricted repository
+access. File entries match exact files. Directory entries ending in `/` or
+`/**` match files under that directory. The active file access policy is stored
+with each agent task so resumed tasks keep using the same policy.
+
 ## CLI Commands
 
 ```text

@@ -116,7 +116,7 @@ impl Tool for ListProjectFilesTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "List repository files, excluding .git, target, .specforge, and SpecForge-owned spec files.".to_string(),
+            description: "List repository files allowed by .specforge/config.yaml file_access.allowed, excluding .git, target, .specforge, and SpecForge-owned spec files.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -142,7 +142,7 @@ impl Tool for InspectFileTool {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description:
-                "Return a bounded repository file excerpt by relative path and line range."
+                "Return a bounded excerpt from an allowed repository file by relative path and line range."
                     .to_string(),
             parameters: json!({
                 "type": "object",
