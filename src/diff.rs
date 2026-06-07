@@ -276,7 +276,7 @@ mod tests {
             r#"= Test Spec
 
 [[feat.customer-management]]
-== Feature: Customer management
+== Customer management
 
 The user can manage customers.
 "#,
@@ -289,7 +289,7 @@ The user can manage customers.
 Some intro text.
 
 [[feat.customer-management]]
-== Feature: Client management
+== Client management
 
 The user can manage customers.
 "#,
@@ -344,7 +344,7 @@ Language:: Rust1
 Language:: Rust
 
 [[entity.task]]
-== Entity: Task
+== Task
 
 | title
 | string
@@ -359,7 +359,7 @@ Language:: Rust
 Language:: Rust1
 
 [[entity.task]]
-== Entity: Task
+== Task
 
 | title
 | string

@@ -24,10 +24,7 @@ use crate::{
     llm::{LlmClient, LlmPrompt, strip_code_fence},
     prompts,
     provider::Provider,
-    spec::{
-        ParsedSpec, Severity, normalize_missing_anchor_ids, parse_spec, print_diagnostics,
-        validate_model,
-    },
+    spec::{ParsedSpec, Severity, parse_spec, print_diagnostics, validate_model},
     state::clear_current_state,
 };
 
@@ -62,7 +59,7 @@ pub async fn init_spec(options: InitOptions) -> Result<()> {
                 temperature: Some(0.2),
             })
             .await?;
-        let source = normalize_missing_anchor_ids(&strip_code_fence(&generated));
+        let source = strip_code_fence(&generated);
         let generated_config = generate_project_config(&client, &prose, &preferences).await?;
         (source, generated_config)
     };

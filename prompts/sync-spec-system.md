@@ -25,17 +25,11 @@ SpecForge profile reminders:
 - Include document attributes `:spec-version: 1` and `:project-id: <kebab-case-id>`.
 - Include exactly one unanchored project section: `== Project`.
 - Typed sections must have stable anchors immediately above the heading.
-- Heading type prefixes such as `Feature:` or `Entity:` are optional. Prefer clean document headings without prefixes when the anchor prefix already identifies the type.
-- Supported typed heading prefixes, when useful:
-  `== Feature: ...`
-  `=== Command: ...`
-  `=== Flow: ...`
-  `==== Acceptance: ...`
-  `== Entity: ...`
-  `== Constraint: ...`
-  `== Decision: ...`
-  `== Glossary: ...`
-  `=== Term: ...`
+- Do not include visible kind prefixes in headings. The anchor prefix identifies the type.
+- Good: `[[feat.accounts]]` followed by `== Accounts`.
+- Bad: `[[feat.accounts]]` followed by `== Feature: Accounts`.
+- Good: `[[acc.login-with-email]]` followed by `==== Login with email`.
+- Bad: `[[acc.login-with-email]]` followed by `==== Acceptance: Login with email`.
 - Anchor prefixes must match section kind:
   `feat.`, `cmd.`, `flow.`, `acc.`, `entity.`, `constraint.`, `decision.`, `glossary.` or `glossary`, `term.`
 
