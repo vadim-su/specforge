@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use ratatui::{
     Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -225,6 +225,10 @@ impl InitQuestionnaire {
         }
 
         self.advance();
+    }
+
+    fn finish(&mut self) {
+        self.done = true;
     }
 
     fn push_char(&mut self, ch: char) {
@@ -521,6 +525,12 @@ fn run_init_questionnaire_loop(
             && key.kind == KeyEventKind::Press
         {
             match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    bail!("init questionnaire cancelled");
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.finish();
+                }
                 KeyCode::Up => app.select_previous(),
                 KeyCode::Down => app.select_next(),
                 KeyCode::Enter => app.accept_selected(),
@@ -556,7 +566,7 @@ fn draw_init_questionnaire(frame: &mut Frame<'_>, app: &InitQuestionnaire) {
             Span::raw(format!("  {}/{}", app.current + 1, app.questions.len())),
         ]),
         Line::from(question.prompt.as_str()),
-        Line::from("Enter accepts, Esc skips, arrows move."),
+        Line::from("Enter accepts, Esc skips, arrows move. Ctrl-D finishes, Ctrl-C cancels."),
     ]))
     .block(
         Block::default()
