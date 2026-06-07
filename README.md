@@ -34,6 +34,34 @@ Or run the CLI directly from the repository:
 cargo run -- --help
 ```
 
+## Shell Completions
+
+SpecForge can generate completion scripts for shells supported by `clap`:
+
+```sh
+specforge completions bash
+specforge completions zsh
+specforge completions fish
+specforge completions powershell
+specforge completions elvish
+```
+
+Install examples:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+specforge completions bash > ~/.local/share/bash-completion/completions/specforge
+
+mkdir -p ~/.zfunc
+specforge completions zsh > ~/.zfunc/_specforge
+
+mkdir -p ~/.config/fish/completions
+specforge completions fish > ~/.config/fish/completions/specforge.fish
+```
+
+For zsh, ensure `~/.zfunc` is in `fpath` and `compinit` is loaded from
+`.zshrc`.
+
 ## Quick Start
 
 Create a starter spec without an LLM:
@@ -161,6 +189,7 @@ specforge test run
 specforge test cover [TARGET...] [--file PATH] [--item ID_OR_TITLE] [--spec spec.adoc]
 specforge assist expand [SPEC]
 specforge fix [REQUEST...]
+specforge completions <SHELL>
 specforge accept [SPEC]
 ```
 

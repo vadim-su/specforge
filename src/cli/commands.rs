@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use clap::CommandFactory;
 use specforge::{
     agent::{
         DevelopmentAgentOptions, DevelopmentAgentRun, TaskStepStatus, has_pending_code_change_task,
@@ -333,6 +334,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 println!("{}", response.trim());
             }
         },
+        Command::Completions { shell } => {
+            let mut command = Cli::command();
+            let bin_name = command.get_name().to_owned();
+            clap_complete::generate(shell, &mut command, bin_name, &mut io::stdout());
+        }
         Command::Accept { spec } => {
             let parsed = parse_spec_file(&spec)?;
             let diagnostics = validate_model(&parsed.model);

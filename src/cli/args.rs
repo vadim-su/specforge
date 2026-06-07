@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 use specforge::{config::DEFAULT_SPEC, provider::Provider};
 
 use crate::cli::color::ColorMode;
@@ -105,6 +106,11 @@ pub enum Command {
     Assist {
         #[command(subcommand)]
         command: AssistCommand,
+    },
+    /// Generate shell completion scripts.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
     },
     /// Store the spec as the current state for future diffs.
     Accept {

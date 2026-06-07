@@ -45,6 +45,17 @@
 
             cargoLock.lockFile = ./Cargo.lock;
 
+            nativeBuildInputs = [
+              pkgs.installShellFiles
+            ];
+
+            postInstall = ''
+              installShellCompletion --cmd specforge \
+                --bash <($out/bin/specforge completions bash) \
+                --fish <($out/bin/specforge completions fish) \
+                --zsh <($out/bin/specforge completions zsh)
+            '';
+
             doCheck = true;
 
             meta = {
