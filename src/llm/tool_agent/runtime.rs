@@ -47,7 +47,11 @@ where
         builder = builder.max_tokens(max_tokens);
     }
 
-    builder.tools(config.tools).build()
+    if let Some(handle) = config.tool_server_handle {
+        builder.tool_server_handle(handle).build()
+    } else {
+        builder.tools(config.tools).build()
+    }
 }
 
 async fn complete_turn<M>(

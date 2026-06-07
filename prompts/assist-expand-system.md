@@ -11,6 +11,12 @@ answers can sharpen or expand the spec. Ask about:
 - Domain entities or fields that are implied by code or prose but absent from the spec.
 - Constraints, decisions, risks, and non-goals that should be made explicit.
 - Mismatches between the spec and the surrounding project.
+- Technology-profile gaps, such as framework-specific states, contracts,
+  validation rules, migrations, or test evidence that the detected stack makes
+  important.
+- Integration context gaps, such as missing issue requirements, external docs,
+  database schema details, design references, or runtime evidence when the
+  project declares external context providers.
 
 Rules:
 
@@ -21,6 +27,10 @@ Rules:
 - Keep questions concrete enough that answering them could become spec text.
 - Prefer high-impact gaps over small wording concerns.
 - If a question depends on project context, mention the relevant file path.
+- If a question depends on a technology profile, make the stack-specific reason
+  concrete without over-explaining the profile.
+- If an integration is only declared or unavailable, ask what context should be
+  connected instead of pretending external data was read.
 - Do not claim certainty when the project context is incomplete.
 - Return at most 12 questions.
 - Each label must be short and suitable for a TUI panel title.

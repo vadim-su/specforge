@@ -9,14 +9,16 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use rig::{
     OneOrMany,
     message::{AssistantContent, ImageMediaType, Message, ToolCall, ToolResult, UserContent},
+    tool::{ToolDyn, ToolSet, server::ToolServer},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    config::TASKS_DIR,
+    config::{TASKS_DIR, load_project_config},
     diff::{ModelDiff, display_item_key},
+    integrations::mcp::McpRuntime,
     llm::{RigAgentConfig, RigAgentFactory, RuntimeAgent},
     prompts,
     provider::Provider,
@@ -194,6 +196,45 @@ struct AgentToolContext<'a> {
     diff: Option<Value>,
     protected_paths: Vec<String>,
     allowed_paths: Vec<String>,
+    tool_server_handle: rig::tool::server::ToolServerHandle,
+}
+
+struct BuiltRuntimeAgent {
+    agent: RuntimeAgent,
+    tool_server_handle: rig::tool::server::ToolServerHandle,
+    _mcp_runtime: McpRuntime,
+}
+
+async fn build_runtime_agent(
+    provider: Provider,
+    model: Option<String>,
+    name: &str,
+    preamble: String,
+    tools: Vec<Box<dyn ToolDyn>>,
+) -> Result<BuiltRuntimeAgent> {
+    let tool_server_handle = ToolServer::new().run();
+    tool_server_handle
+        .append_toolset(ToolSet::from_tools_boxed(tools))
+        .await
+        .context("failed to register SpecForge tools")?;
+
+    let project_config = load_project_config()?;
+    let mcp_runtime =
+        McpRuntime::start(&project_config.integrations, tool_server_handle.clone()).await?;
+    let agent = RigAgentFactory::new(provider, model).build(RigAgentConfig {
+        name: name.to_string(),
+        preamble,
+        temperature: Some(0.1),
+        max_tokens: None,
+        tools: Vec::new(),
+        tool_server_handle: Some(tool_server_handle.clone()),
+    })?;
+
+    Ok(BuiltRuntimeAgent {
+        agent,
+        tool_server_handle,
+        _mcp_runtime: mcp_runtime,
+    })
 }
 
 pub async fn run_development_agent(
@@ -215,13 +256,14 @@ pub async fn run_development_agent_with_events(
     let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
     let allowed_paths = normalize_allowed_paths(&options.allowed_paths)?;
-    let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
-        name: "specforge_development_agent".to_string(),
-        preamble: prompts::DEVELOPMENT_AGENT_SYSTEM.to_string(),
-        temperature: Some(0.1),
-        max_tokens: None,
-        tools: development_tools(),
-    })?;
+    let agent = build_runtime_agent(
+        options.provider,
+        options.model,
+        "specforge_development_agent",
+        prompts::DEVELOPMENT_AGENT_SYSTEM.to_string(),
+        development_tools(),
+    )
+    .await?;
     let task_id = task_id(previous_current, target)?;
     let task_dir = Path::new(TASKS_DIR).join(&task_id);
     fs::create_dir_all(&task_dir)
@@ -232,6 +274,7 @@ pub async fn run_development_agent_with_events(
         diff: Some(diff_value.clone()),
         protected_paths: protected_paths.clone(),
         allowed_paths: allowed_paths.clone(),
+        tool_server_handle: agent.tool_server_handle.clone(),
     };
     let mut state = AgentTaskState::new(
         TaskKind::SpecSync,
@@ -280,7 +323,7 @@ pub async fn run_development_agent_with_events(
     let mut final_answer = None;
     let mut patch_history = Vec::new();
     let completed = run_agent_loop(
-        &agent,
+        &agent.agent,
         &task_dir,
         &mut state,
         &mut thread,
@@ -347,19 +390,21 @@ pub async fn resume_pending_development_task_with_events(
             )
         })?,
     )?;
+    let agent = build_runtime_agent(
+        options.provider,
+        options.model,
+        "specforge_development_agent",
+        prompts::DEVELOPMENT_AGENT_SYSTEM.to_string(),
+        development_tools(),
+    )
+    .await?;
     let context = AgentToolContext {
         target: Some(&target),
         diff: Some(diff),
         protected_paths: state.protected_paths.clone(),
         allowed_paths: state.allowed_paths.clone(),
+        tool_server_handle: agent.tool_server_handle.clone(),
     };
-    let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
-        name: "specforge_development_agent".to_string(),
-        preamble: prompts::DEVELOPMENT_AGENT_SYSTEM.to_string(),
-        temperature: Some(0.1),
-        max_tokens: None,
-        tools: development_tools(),
-    })?;
     let mut patch_history = read_patch_history(&task_dir)?;
     let mut final_answer = read_result(&task_dir)?;
 
@@ -382,7 +427,7 @@ pub async fn resume_pending_development_task_with_events(
 
     if state.status != TaskStatus::Completed {
         let completed = run_agent_loop(
-            &agent,
+            &agent.agent,
             &task_dir,
             &mut state,
             &mut thread,
@@ -482,13 +527,14 @@ async fn run_code_change_task_with_events(
     let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
     let allowed_paths = normalize_allowed_paths(&options.allowed_paths)?;
-    let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
-        name: "specforge_code_change_agent".to_string(),
-        preamble: prompts::CODE_CHANGE_AGENT_SYSTEM.to_string(),
-        temperature: Some(0.1),
-        max_tokens: None,
-        tools: code_change_tools(),
-    })?;
+    let agent = build_runtime_agent(
+        options.provider,
+        options.model,
+        "specforge_code_change_agent",
+        prompts::CODE_CHANGE_AGENT_SYSTEM.to_string(),
+        code_change_tools(),
+    )
+    .await?;
     let image_hashes = images.iter().map(image_hash).collect::<Vec<_>>();
     let request_hash = short_hash(&format!("{}\n{}", request, image_hashes.join("\n")));
     let task_id = timestamped_task_id(task_prefix, &request_hash)?;
@@ -500,6 +546,7 @@ async fn run_code_change_task_with_events(
         diff: None,
         protected_paths: protected_paths.clone(),
         allowed_paths: allowed_paths.clone(),
+        tool_server_handle: agent.tool_server_handle.clone(),
     };
     let mut state = AgentTaskState::new(
         task_kind,
@@ -537,7 +584,7 @@ async fn run_code_change_task_with_events(
     let mut final_answer = None;
     let mut patch_history = Vec::new();
     let completed = run_agent_loop(
-        &agent,
+        &agent.agent,
         &task_dir,
         &mut state,
         &mut thread,
@@ -625,19 +672,21 @@ async fn resume_pending_code_change_task_with_kind(
 
     let mut state = read_task_state(&task_dir)?;
     let mut thread = read_thread(&task_dir)?;
+    let agent = build_runtime_agent(
+        options.provider,
+        options.model,
+        "specforge_code_change_agent",
+        prompts::CODE_CHANGE_AGENT_SYSTEM.to_string(),
+        code_change_tools(),
+    )
+    .await?;
     let context = AgentToolContext {
         target: None,
         diff: None,
         protected_paths: state.protected_paths.clone(),
         allowed_paths: state.allowed_paths.clone(),
+        tool_server_handle: agent.tool_server_handle.clone(),
     };
-    let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
-        name: "specforge_code_change_agent".to_string(),
-        preamble: prompts::CODE_CHANGE_AGENT_SYSTEM.to_string(),
-        temperature: Some(0.1),
-        max_tokens: None,
-        tools: code_change_tools(),
-    })?;
     let mut patch_history = read_patch_history(&task_dir)?;
     let mut final_answer = read_result(&task_dir)?;
 
@@ -660,7 +709,7 @@ async fn resume_pending_code_change_task_with_kind(
 
     if state.status != TaskStatus::Completed {
         let completed = run_agent_loop(
-            &agent,
+            &agent.agent,
             &task_dir,
             &mut state,
             &mut thread,
@@ -755,27 +804,28 @@ async fn run_agent_loop(
             events(DevelopmentAgentEvent::ToolStarted {
                 name: call.function.name.clone(),
             });
-            let output = match execute_tool(call, task_dir, state, context, patch_history, events) {
-                Ok(output) => output,
-                Err(error) => {
-                    let output = json!({
-                        "ok": false,
-                        "error": format!("tool execution failed: {error:#}"),
-                    });
-                    events(DevelopmentAgentEvent::ToolFinished {
-                        name: call.function.name.clone(),
-                        ok: Some(false),
-                    });
-                    record_tool_result(task_dir, thread, call, &output)?;
-                    record_skipped_tool_results(
-                        task_dir,
-                        thread,
-                        tool_calls.iter().skip(call_index + 1),
-                        "a previous tool failed before this call could run",
-                    )?;
-                    return Err(error);
-                }
-            };
+            let output =
+                match execute_tool(call, task_dir, state, context, patch_history, events).await {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let output = json!({
+                            "ok": false,
+                            "error": format!("tool execution failed: {error:#}"),
+                        });
+                        events(DevelopmentAgentEvent::ToolFinished {
+                            name: call.function.name.clone(),
+                            ok: Some(false),
+                        });
+                        record_tool_result(task_dir, thread, call, &output)?;
+                        record_skipped_tool_results(
+                            task_dir,
+                            thread,
+                            tool_calls.iter().skip(call_index + 1),
+                            "a previous tool failed before this call could run",
+                        )?;
+                        return Err(error);
+                    }
+                };
             events(DevelopmentAgentEvent::ToolFinished {
                 name: call.function.name.clone(),
                 ok: output.get("ok").and_then(Value::as_bool),
@@ -1013,7 +1063,7 @@ fn initial_user_message(target: &ParsedSpec, diff: &Value) -> Result<String> {
     ))
 }
 
-fn execute_tool(
+async fn execute_tool(
     call: &ToolCall,
     task_dir: &Path,
     state: &mut AgentTaskState,
@@ -1044,11 +1094,33 @@ fn execute_tool(
         }
         "inspect_file" => inspect_file(call, &context.protected_paths, &context.allowed_paths),
         "propose_patch" => apply_patch_tool(call, task_dir, state, context, patch_history, events),
-        other => Ok(json!({
-            "ok": false,
-            "error": format!("unknown tool `{other}`"),
-        })),
+        other => execute_external_tool(other, call, context).await,
     }
+}
+
+async fn execute_external_tool(
+    tool_name: &str,
+    call: &ToolCall,
+    context: &AgentToolContext<'_>,
+) -> Result<Value> {
+    let args = serde_json::to_string(&call.function.arguments)
+        .context("failed to serialize external tool arguments")?;
+    let output = match context.tool_server_handle.call_tool(tool_name, &args).await {
+        Ok(output) => output,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("unknown tool `{tool_name}` or external tool failed: {error}"),
+            }));
+        }
+    };
+
+    Ok(serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
+        json!({
+            "ok": true,
+            "result": output,
+        })
+    }))
 }
 
 fn inspect_spec_item(call: &ToolCall, target: &ParsedSpec) -> Result<Value> {

@@ -1,7 +1,6 @@
 use std::{
-    fs,
     io::{self, IsTerminal},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -17,15 +16,12 @@ use ratatui::{
 use serde::Deserialize;
 
 use crate::{
+    context::ContextBundle,
     llm::{LlmClient, LlmPrompt},
     prompts,
     provider::Provider,
     spec::{Severity, parse_spec_file, print_diagnostics, validate_model},
 };
-
-const MAX_PROJECT_FILES: usize = 160;
-const MAX_CONTEXT_FILES: usize = 8;
-const MAX_CONTEXT_FILE_BYTES: usize = 12_000;
 
 #[derive(Debug)]
 pub struct AssistExpandOptions {
@@ -49,7 +45,7 @@ pub async fn expand_spec(options: AssistExpandOptions) -> Result<String> {
     }
 
     let root = std::env::current_dir().context("failed to read current directory")?;
-    let project_context = ProjectContext::collect(&root, &options.spec)?;
+    let project_context = ContextBundle::collect(&root, &options.spec)?;
     let user_prompt = expand_user_prompt(&options, &parsed.source, &project_context);
     let client = LlmClient::new(options.provider, options.model.clone());
     let questions = assist_questionnaire_plan(&client, user_prompt).await?;
@@ -300,7 +296,7 @@ fn render_questions(questions: &[AssistQuestion]) -> String {
 fn expand_user_prompt(
     options: &AssistExpandOptions,
     spec_source: &str,
-    context: &ProjectContext,
+    context: &ContextBundle,
 ) -> String {
     let focus = options
         .focus
@@ -310,12 +306,14 @@ fn expand_user_prompt(
         .unwrap_or("No explicit focus was provided.");
 
     format!(
-        "Review this SpecForge spec and the project context. Build the interactive expansion questionnaire.\n\nFocus: {focus}\n\n<spec path=\"{}\">\n{}\n</spec>\n\n<project-files truncated=\"{}\">\n{}\n</project-files>\n\n<context-files>\n{}\n</context-files>\n",
+        "Review this SpecForge spec and the project context. Build the interactive expansion questionnaire.\n\nFocus: {focus}\n\n<spec path=\"{}\">\n{}\n</spec>\n\n<technology-profiles>\n{}\n</technology-profiles>\n\n<context-integrations>\n{}\n</context-integrations>\n\n<project-files truncated=\"{}\">\n{}\n</project-files>\n\n<context-files>\n{}\n</context-files>\n",
         options.spec.display(),
         spec_source.trim(),
+        context.render_profiles_prompt(),
+        context.render_integrations_prompt(),
         context.files_truncated,
-        context.files.join("\n"),
-        context.file_snippets.join("\n\n")
+        context.render_project_files_prompt(),
+        context.render_file_snippets_prompt()
     )
 }
 
@@ -483,7 +481,7 @@ Use the user's answers to turn the questionnaire into actionable conclusions:
 fn assist_summary_user_prompt(
     options: &AssistExpandOptions,
     spec_source: &str,
-    context: &ProjectContext,
+    context: &ContextBundle,
     answers: &AssistAnswers,
 ) -> String {
     let focus = options
@@ -494,212 +492,16 @@ fn assist_summary_user_prompt(
         .unwrap_or("No explicit focus was provided.");
 
     format!(
-        "Create conclusions for expanding this SpecForge spec from the user's questionnaire answers.\n\nFocus: {focus}\n\n<spec path=\"{}\">\n{}\n</spec>\n\n<project-files truncated=\"{}\">\n{}\n</project-files>\n\n<context-files>\n{}\n</context-files>\n\n<answers>\n{}\n</answers>\n",
+        "Create conclusions for expanding this SpecForge spec from the user's questionnaire answers.\n\nFocus: {focus}\n\n<spec path=\"{}\">\n{}\n</spec>\n\n<technology-profiles>\n{}\n</technology-profiles>\n\n<context-integrations>\n{}\n</context-integrations>\n\n<project-files truncated=\"{}\">\n{}\n</project-files>\n\n<context-files>\n{}\n</context-files>\n\n<answers>\n{}\n</answers>\n",
         options.spec.display(),
         spec_source.trim(),
+        context.render_profiles_prompt(),
+        context.render_integrations_prompt(),
         context.files_truncated,
-        context.files.join("\n"),
-        context.file_snippets.join("\n\n"),
+        context.render_project_files_prompt(),
+        context.render_file_snippets_prompt(),
         answers.prompt_block()
     )
-}
-
-#[derive(Debug)]
-struct ProjectContext {
-    files: Vec<String>,
-    files_truncated: bool,
-    file_snippets: Vec<String>,
-}
-
-impl ProjectContext {
-    fn collect(root: &Path, spec_path: &Path) -> Result<Self> {
-        let mut files = Vec::new();
-        collect_project_files(root, root, spec_path, &mut files)?;
-        files.sort();
-        let files_truncated = files.len() > MAX_PROJECT_FILES;
-        files.truncate(MAX_PROJECT_FILES);
-
-        let context_files = select_context_files(&files);
-        let mut file_snippets = Vec::new();
-        for relative in context_files {
-            let path = root.join(&relative);
-            let Ok(source) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let snippet = truncate_at_char_boundary(&source, MAX_CONTEXT_FILE_BYTES);
-            file_snippets.push(format!(
-                "<file path=\"{relative}\">\n{}\n</file>",
-                snippet.trim()
-            ));
-        }
-
-        Ok(Self {
-            files,
-            files_truncated,
-            file_snippets,
-        })
-    }
-}
-
-fn collect_project_files(
-    root: &Path,
-    current: &Path,
-    spec_path: &Path,
-    files: &mut Vec<String>,
-) -> Result<()> {
-    let mut entries = fs::read_dir(current)
-        .with_context(|| format!("failed to read {}", current.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to read entries under {}", current.display()))?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-
-        if should_skip_dir_or_file(&name) {
-            continue;
-        }
-
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", path.display()))?;
-        if file_type.is_dir() {
-            collect_project_files(root, &path, spec_path, files)?;
-        } else if file_type.is_file() {
-            let relative_path = path.strip_prefix(root).unwrap_or(path.as_path());
-            if same_path(root, relative_path, spec_path) {
-                continue;
-            }
-            files.push(relative_path.to_string_lossy().replace('\\', "/"));
-        }
-    }
-
-    Ok(())
-}
-
-fn should_skip_dir_or_file(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | ".specforge"
-            | "target"
-            | "node_modules"
-            | "dist"
-            | "build"
-            | ".next"
-            | "coverage"
-            | "vendor"
-            | ".DS_Store"
-    )
-}
-
-fn same_path(root: &Path, relative_path: &Path, candidate: &Path) -> bool {
-    if candidate.is_absolute() {
-        return candidate
-            .strip_prefix(root)
-            .is_ok_and(|candidate_relative| candidate_relative == relative_path);
-    }
-
-    normalize_relative_path(candidate) == relative_path
-}
-
-fn normalize_relative_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        if let std::path::Component::Normal(value) = component {
-            normalized.push(value);
-        }
-    }
-
-    normalized
-}
-
-fn select_context_files(files: &[String]) -> Vec<String> {
-    let mut selected = Vec::new();
-    let priority_names = [
-        "README.md",
-        "Cargo.toml",
-        "package.json",
-        "pyproject.toml",
-        "go.mod",
-        "pom.xml",
-        "Makefile",
-        "src/main.rs",
-        "src/lib.rs",
-        "src/main.ts",
-        "src/main.tsx",
-        "src/App.tsx",
-        "src/app.js",
-        "index.html",
-    ];
-
-    for priority in priority_names {
-        if selected.len() >= MAX_CONTEXT_FILES {
-            break;
-        }
-        if files.iter().any(|file| file == priority) {
-            selected.push(priority.to_string());
-        }
-    }
-
-    for file in files {
-        if selected.len() >= MAX_CONTEXT_FILES {
-            break;
-        }
-        if selected.iter().any(|selected_file| selected_file == file) {
-            continue;
-        }
-        if is_likely_source_or_doc(file) {
-            selected.push(file.clone());
-        }
-    }
-
-    selected
-}
-
-fn is_likely_source_or_doc(file: &str) -> bool {
-    matches!(
-        Path::new(file)
-            .extension()
-            .and_then(|extension| extension.to_str()),
-        Some(
-            "adoc"
-                | "md"
-                | "rs"
-                | "js"
-                | "jsx"
-                | "ts"
-                | "tsx"
-                | "py"
-                | "go"
-                | "java"
-                | "kt"
-                | "rb"
-                | "php"
-                | "swift"
-                | "cs"
-                | "toml"
-                | "yaml"
-                | "yml"
-                | "json"
-                | "html"
-                | "css"
-        )
-    )
-}
-
-fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn strip_json_fence(text: &str) -> &str {
@@ -722,36 +524,6 @@ fn strip_json_fence(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prioritizes_project_context_files() {
-        let files = vec![
-            "src/feature.rs".to_string(),
-            "README.md".to_string(),
-            "Cargo.toml".to_string(),
-            "src/main.rs".to_string(),
-        ];
-
-        assert_eq!(
-            select_context_files(&files),
-            vec!["README.md", "Cargo.toml", "src/main.rs", "src/feature.rs"]
-        );
-    }
-
-    #[test]
-    fn truncates_at_utf8_boundary() {
-        assert_eq!(truncate_at_char_boundary("aéz", 2), "a");
-    }
-
-    #[test]
-    fn detects_selected_spec_path_variants() {
-        let root = Path::new("/repo");
-        let relative = Path::new("spec.adoc");
-
-        assert!(same_path(root, relative, Path::new("spec.adoc")));
-        assert!(same_path(root, relative, Path::new("./spec.adoc")));
-        assert!(same_path(root, relative, Path::new("/repo/spec.adoc")));
-    }
 
     #[test]
     fn normalizes_assist_question_options() {

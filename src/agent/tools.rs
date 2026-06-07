@@ -1,9 +1,5 @@
-use rig::{
-    completion::ToolDefinition,
-    tool::{Tool, ToolDyn},
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use rig::{tool::ToolDyn, tool_macro};
+use serde_json::Value;
 
 #[derive(Debug)]
 struct SpecForgeToolError;
@@ -16,193 +12,97 @@ impl std::fmt::Display for SpecForgeToolError {
 
 impl std::error::Error for SpecForgeToolError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectSpecDiffTool;
+/// Return the semantic diff between the previous current spec and the newly stored current spec.
+#[tool_macro]
+fn inspect_spec_diff() -> Result<Value, SpecForgeToolError> {
+    Err(SpecForgeToolError)
+}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectSpecDiffArgs {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectSpecItemTool;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectSpecItemArgs {
+/// Return one target spec item by stable ID, including its source excerpt.
+#[tool_macro(required(id))]
+fn inspect_spec_item(
+    /// Stable spec item ID, for example feat.todo-management
     id: String,
+) -> Result<Value, SpecForgeToolError> {
+    let _ = id;
+    Err(SpecForgeToolError)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ListProjectFilesTool;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ListProjectFilesArgs {
+/// List repository files allowed by .specforge/config.yaml file_access.allowed, excluding .git, target, .specforge, and SpecForge-owned spec files.
+#[tool_macro]
+fn list_project_files(
+    /// Maximum number of files to return.
     limit: Option<u64>,
+) -> Result<Value, SpecForgeToolError> {
+    let _ = limit;
+    Err(SpecForgeToolError)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectFileTool;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InspectFileArgs {
+/// Return a bounded excerpt from an allowed repository file by relative path and line range.
+#[tool_macro(required(path))]
+fn inspect_file(
+    /// Relative repository path.
     path: String,
+    /// First line to include, 1-based.
     start_line: Option<u64>,
+    /// Last line to include, 1-based.
     end_line: Option<u64>,
+) -> Result<Value, SpecForgeToolError> {
+    let _ = (path, start_line, end_line);
+    Err(SpecForgeToolError)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProposePatchTool;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProposePatchArgs {
+/// Validate and apply one Codex apply_patch patch, then run project checks and return the result.
+#[tool_macro(required(summary, patch))]
+fn propose_patch(
+    /// Short human-readable patch summary.
     summary: String,
+    /// Complete Codex apply_patch patch text.
     patch: String,
-}
-
-impl Tool for InspectSpecDiffTool {
-    const NAME: &'static str = "inspect_spec_diff";
-    type Error = SpecForgeToolError;
-    type Args = InspectSpecDiffArgs;
-    type Output = Value;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Return the semantic diff between the previous current spec and the newly stored current spec.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn call(&self, _args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        Err(SpecForgeToolError)
-    }
-}
-
-impl Tool for InspectSpecItemTool {
-    const NAME: &'static str = "inspect_spec_item";
-    type Error = SpecForgeToolError;
-    type Args = InspectSpecItemArgs;
-    type Output = Value;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Return one target spec item by stable ID, including its source excerpt."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Stable spec item ID, for example feat.todo-management" }
-                },
-                "required": ["id"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn call(&self, _args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        Err(SpecForgeToolError)
-    }
-}
-
-impl Tool for ListProjectFilesTool {
-    const NAME: &'static str = "list_project_files";
-    type Error = SpecForgeToolError;
-    type Args = ListProjectFilesArgs;
-    type Output = Value;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "List repository files allowed by .specforge/config.yaml file_access.allowed, excluding .git, target, .specforge, and SpecForge-owned spec files.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
-                },
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn call(&self, _args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        Err(SpecForgeToolError)
-    }
-}
-
-impl Tool for InspectFileTool {
-    const NAME: &'static str = "inspect_file";
-    type Error = SpecForgeToolError;
-    type Args = InspectFileArgs;
-    type Output = Value;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description:
-                "Return a bounded excerpt from an allowed repository file by relative path and line range."
-                    .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative repository path" },
-                    "start_line": { "type": "integer", "minimum": 1 },
-                    "end_line": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn call(&self, _args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        Err(SpecForgeToolError)
-    }
-}
-
-impl Tool for ProposePatchTool {
-    const NAME: &'static str = "propose_patch";
-    type Error = SpecForgeToolError;
-    type Args = ProposePatchArgs;
-    type Output = Value;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Validate and apply one Codex apply_patch patch, then run project checks and return the result.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "summary": { "type": "string", "description": "Short human-readable patch summary" },
-                    "patch": { "type": "string", "description": "Complete Codex apply_patch patch text" }
-                },
-                "required": ["summary", "patch"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    async fn call(&self, _args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        Err(SpecForgeToolError)
-    }
+) -> Result<Value, SpecForgeToolError> {
+    let _ = (summary, patch);
+    Err(SpecForgeToolError)
 }
 
 pub(super) fn development_tools() -> Vec<Box<dyn ToolDyn>> {
     vec![
-        Box::new(InspectSpecDiffTool),
-        Box::new(InspectSpecItemTool),
-        Box::new(ListProjectFilesTool),
-        Box::new(InspectFileTool),
-        Box::new(ProposePatchTool),
+        Box::new(InspectSpecDiff),
+        Box::new(InspectSpecItem),
+        Box::new(ListProjectFiles),
+        Box::new(InspectFile),
+        Box::new(ProposePatch),
     ]
 }
 
 pub(super) fn code_change_tools() -> Vec<Box<dyn ToolDyn>> {
     vec![
-        Box::new(ListProjectFilesTool),
-        Box::new(InspectFileTool),
-        Box::new(ProposePatchTool),
+        Box::new(ListProjectFiles),
+        Box::new(InspectFile),
+        Box::new(ProposePatch),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn declarative_tools_keep_expected_names() {
+        let tools = development_tools();
+        let mut names = Vec::new();
+        for tool in tools {
+            names.push(tool.definition(String::new()).await.name);
+        }
+
+        assert_eq!(
+            names,
+            vec![
+                "inspect_spec_diff",
+                "inspect_spec_item",
+                "list_project_files",
+                "inspect_file",
+                "propose_patch"
+            ]
+        );
+    }
 }

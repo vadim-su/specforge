@@ -1,9 +1,12 @@
 pub mod agent;
 pub mod assist;
 pub mod config;
+pub mod context;
 pub mod diff;
 pub mod init;
+pub mod integrations;
 pub mod llm;
+pub mod profiles;
 pub mod prompts;
 pub mod provider;
 pub mod spec;

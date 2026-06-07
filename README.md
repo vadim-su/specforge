@@ -17,6 +17,10 @@ and driving implementation work from the accepted changes.
 - Normalize spec tags, accept the new state, and optionally run the development
   agent for the detected changes.
 - Ask for targeted product and engineering questions that can expand a spec.
+- Detect technology profiles from project files and use stack-specific guidance
+  while expanding specs.
+- Declare external context providers, including future MCP adapters, in project
+  config.
 - Apply ad-hoc code fixes with the code change agent.
 - Run configured project checks and ask the agent to add or improve tests for
   plain-text targets, files, or spec items.
@@ -185,6 +189,47 @@ An empty or omitted `allowed` list keeps the default unrestricted repository
 access. File entries match exact files. Directory entries ending in `/` or
 `/**` match files under that directory. The active file access policy is stored
 with each agent task so resumed tasks keep using the same policy.
+
+## Technology Profiles and Context Providers
+
+`specforge assist expand` builds a normalized context bundle from the project
+before asking targeted spec questions. The bundle currently includes:
+
+- a filesystem provider that lists project files and reads selected source/doc
+  snippets;
+- detected technology profiles such as Rust, TypeScript, React, Python,
+  FastAPI, and Postgres;
+- declared MCP integration slots from `.specforge/config.yaml`.
+
+Profiles are data-driven stack hints. They guide questions toward details the
+stack makes important: CLI behavior for Rust, UI states for React, endpoint
+contracts for FastAPI, migration safety for Postgres, and similar concerns.
+
+MCP servers are declared under `integrations.mcp`:
+
+```yaml
+integrations:
+  mcp:
+    context7:
+      command: "npx"
+      args: ["-y", "@upstash/context7-mcp"]
+      env_vars: ["LOCAL_TOKEN"]
+      env:
+        MY_ENV_VAR: "MY_ENV_VALUE"
+```
+
+`env_vars` lists additional variable names to inherit from the process
+environment. SpecForge also preserves a small baseline environment such as
+`PATH` and home-directory variables so command-based servers like `npx` can
+start. `env` contains inline overrides for that MCP server. SpecForge may
+mention env key names in LLM context, but it does not include inline env values
+in prompts.
+
+When an agent-backed command runs, SpecForge starts enabled MCP servers over
+stdio, registers their exposed tools in Rig's shared tool server, and shuts them
+down when the command exits. Local SpecForge agent tools and MCP tools share the
+same Rig tool surface, while local filesystem and patch tools still execute
+through SpecForge's guarded agent loop.
 
 ## CLI Commands
 

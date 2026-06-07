@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -19,6 +20,8 @@ pub struct ProjectConfig {
     pub checks: Vec<ProjectCheckConfig>,
     #[serde(default)]
     pub file_access: ProjectFileAccessConfig,
+    #[serde(default)]
+    pub integrations: ProjectIntegrationsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +34,25 @@ pub struct ProjectCheckConfig {
 pub struct ProjectFileAccessConfig {
     #[serde(default)]
     pub allowed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectIntegrationsConfig {
+    #[serde(default)]
+    pub mcp: BTreeMap<String, ProjectMcpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectMcpServerConfig {
+    pub command: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 pub fn load_project_config() -> Result<ProjectConfig> {
@@ -70,6 +92,10 @@ pub fn project_config_path() -> PathBuf {
 
 fn parse_project_config(source: &str) -> Result<ProjectConfig> {
     serde_yaml_ng::from_str(source).context("invalid project config yaml")
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -119,5 +145,46 @@ file_access:
                 allowed: vec!["Cargo.toml".to_string(), "src/".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn parses_mcp_integration_config() {
+        let config = parse_project_config(
+            r#"
+integrations:
+  mcp:
+    context7:
+      command: "npx"
+      args: ["-y", "@upstash/context7-mcp"]
+      env_vars: ["LOCAL_TOKEN"]
+      env:
+        MY_ENV_VAR: "MY_ENV_VALUE"
+    figma:
+      command: "figma-mcp"
+      enabled: false
+"#,
+        )
+        .expect("config should parse");
+
+        let context7 = config
+            .integrations
+            .mcp
+            .get("context7")
+            .expect("context7 config should parse");
+        assert_eq!(context7.command, "npx");
+        assert_eq!(context7.args, vec!["-y", "@upstash/context7-mcp"]);
+        assert_eq!(context7.env_vars, vec!["LOCAL_TOKEN"]);
+        assert_eq!(
+            context7.env.get("MY_ENV_VAR").map(String::as_str),
+            Some("MY_ENV_VALUE")
+        );
+
+        let figma = config
+            .integrations
+            .mcp
+            .get("figma")
+            .expect("figma config should parse");
+        assert!(!figma.enabled);
+        assert!(figma.args.is_empty());
     }
 }
