@@ -1,6 +1,6 @@
 use std::{
     fmt, fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    agents::{RigAgentConfig, RigAgentFactory, RuntimeAgent},
     config::TASKS_DIR,
     diff::{ModelDiff, display_item_key},
+    llm::{RigAgentConfig, RigAgentFactory, RuntimeAgent},
     prompts,
     provider::Provider,
     spec::{ParsedSpec, SpecItem},
@@ -21,12 +21,20 @@ use crate::{
 
 mod checks;
 mod patch;
+mod path_policy;
 mod project_files;
+mod task_store;
 mod tools;
 
 use checks::project_check_plan;
 use patch::{ProposedPatch, apply_proposed_patch, validate_apply_patch_with_protected_paths};
+use path_policy::{normalize_allowed_paths, normalize_protected_paths};
 use project_files::{inspect_file, list_project_files};
+use task_store::{
+    AgentTaskState, AgentThread, TaskKind, TaskStatus, latest_pending_task_dir,
+    persist_patch_history, read_patch_history, read_result, read_task_state, read_thread,
+    write_task_state, write_thread,
+};
 use tools::{code_change_tools, development_tools};
 
 pub use checks::{CheckRun, ProjectCheckRun, run_project_checks};
@@ -100,25 +108,6 @@ pub enum TaskStepStatus {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum TaskStatus {
-    Running,
-    Completed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum TaskKind {
-    SpecSync,
-    CodeChange,
-    TestCoverage,
-}
-
-fn default_task_kind() -> TaskKind {
-    TaskKind::SpecSync
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentTurnBudget {
     Unbounded,
@@ -165,27 +154,6 @@ impl fmt::Display for AgentTurnBudget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentTaskState {
-    #[serde(default = "default_task_kind")]
-    kind: TaskKind,
-    task_id: String,
-    previous_current_spec_hash: String,
-    target_spec_hash: String,
-    max_steps: usize,
-    #[serde(default)]
-    protected_paths: Vec<String>,
-    #[serde(default)]
-    allowed_paths: Vec<String>,
-    status: TaskStatus,
-    checklist: Vec<TaskChecklistItem>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AgentThread {
-    messages: Vec<Message>,
-}
-
 #[derive(Debug, Serialize)]
 struct DiffSummary<'a> {
     added: Vec<ItemSummary<'a>>,
@@ -215,61 +183,6 @@ struct AgentToolContext<'a> {
     diff: Option<Value>,
     protected_paths: Vec<String>,
     allowed_paths: Vec<String>,
-}
-
-impl AgentTaskState {
-    fn new(
-        kind: TaskKind,
-        task_id: String,
-        previous_current_spec_hash: &str,
-        target_spec_hash: &str,
-        max_steps: usize,
-        protected_paths: Vec<String>,
-        allowed_paths: Vec<String>,
-    ) -> Self {
-        Self {
-            kind,
-            task_id,
-            previous_current_spec_hash: previous_current_spec_hash.to_string(),
-            target_spec_hash: target_spec_hash.to_string(),
-            max_steps,
-            protected_paths,
-            allowed_paths,
-            status: TaskStatus::Running,
-            checklist: vec![
-                checklist_item("task-created", "Task created"),
-                checklist_item("agent-started", "Agent loop started"),
-                checklist_item("completed", "Task completed"),
-            ],
-        }
-    }
-
-    fn complete_step(&mut self, id: &str) {
-        if let Some(item) = self.checklist.iter_mut().find(|item| item.id == id) {
-            item.status = TaskStepStatus::Completed;
-        }
-    }
-
-    fn complete_or_add_step(&mut self, id: String, label: String) {
-        if let Some(item) = self.checklist.iter_mut().find(|item| item.id == id) {
-            item.label = label;
-            item.status = TaskStepStatus::Completed;
-        } else {
-            self.checklist.push(TaskChecklistItem {
-                id,
-                label,
-                status: TaskStepStatus::Completed,
-            });
-        }
-    }
-}
-
-fn checklist_item(id: &str, label: &str) -> TaskChecklistItem {
-    TaskChecklistItem {
-        id: id.to_string(),
-        label: label.to_string(),
-        status: TaskStepStatus::Pending,
-    }
 }
 
 pub async fn run_development_agent(
@@ -979,126 +892,6 @@ fn finish_task(
     Ok(())
 }
 
-fn persist_patch_history(task_dir: &Path, patches: &[ProposedPatch]) -> Result<()> {
-    fs::write(
-        task_dir.join("patches.json"),
-        serde_json::to_string_pretty(patches)?,
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            task_dir.join("patches.json").display()
-        )
-    })?;
-
-    if let Some((index, patch)) = patches.iter().enumerate().last() {
-        persist_patch_record(task_dir, index + 1, patch)?;
-    }
-
-    Ok(())
-}
-
-fn persist_patch_record(task_dir: &Path, index: usize, patch: &ProposedPatch) -> Result<()> {
-    let patch_path = task_dir.join(format!("patch-{index}.apply"));
-    fs::write(&patch_path, ensure_trailing_newline(&patch.patch))
-        .with_context(|| format!("failed to write {}", patch_path.display()))?;
-    fs::write(
-        task_dir.join(format!("patch-{index}.json")),
-        serde_json::to_string_pretty(patch)?,
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            task_dir.join(format!("patch-{index}.json")).display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn write_task_state(task_dir: &Path, state: &AgentTaskState) -> Result<()> {
-    fs::write(
-        task_dir.join("task.json"),
-        serde_json::to_string_pretty(state)?,
-    )
-    .with_context(|| format!("failed to write {}", task_dir.join("task.json").display()))?;
-
-    Ok(())
-}
-
-fn read_task_state(task_dir: &Path) -> Result<AgentTaskState> {
-    let path = task_dir.join("task.json");
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-fn write_thread(task_dir: &Path, thread: &AgentThread) -> Result<()> {
-    fs::write(
-        task_dir.join("thread.json"),
-        serde_json::to_string_pretty(thread)?,
-    )
-    .with_context(|| format!("failed to write {}", task_dir.join("thread.json").display()))?;
-
-    Ok(())
-}
-
-fn read_thread(task_dir: &Path) -> Result<AgentThread> {
-    let path = task_dir.join("thread.json");
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-fn read_patch_history(task_dir: &Path) -> Result<Vec<ProposedPatch>> {
-    let path = task_dir.join("patches.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-fn read_result(task_dir: &Path) -> Result<Option<String>> {
-    let path = task_dir.join("result.md");
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))
-        .map(Some)
-}
-
-fn latest_pending_task_dir(kind: TaskKind) -> Result<Option<PathBuf>> {
-    let tasks_root = Path::new(TASKS_DIR);
-    if !tasks_root.exists() {
-        return Ok(None);
-    }
-
-    let mut pending = Vec::new();
-    for entry in fs::read_dir(tasks_root).context("failed to read .specforge tasks directory")? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let task_dir = entry.path();
-        let task_path = task_dir.join("task.json");
-        if !task_path.exists() {
-            continue;
-        }
-        let state = read_task_state(&task_dir)?;
-        if state.status == TaskStatus::Running && state.kind == kind {
-            pending.push(task_dir);
-        }
-    }
-    pending.sort();
-
-    Ok(pending.pop())
-}
-
 fn code_change_user_message(request: &str) -> Result<String> {
     let check_plan = project_check_plan()?;
     Ok(format!(
@@ -1406,135 +1199,6 @@ fn short_hash(text: &str) -> String {
         .collect()
 }
 
-fn is_safe_relative_path(path: &Path) -> bool {
-    !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
-}
-
-fn normalize_protected_paths(paths: &[PathBuf]) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .filter_map(|path| normalize_protected_path(path).transpose())
-        .collect()
-}
-
-fn normalize_protected_path(path: &Path) -> Result<Option<String>> {
-    let current_dir = std::env::current_dir().context("failed to read current directory")?;
-    let relative = if path.is_absolute() {
-        let Ok(stripped) = path.strip_prefix(&current_dir) else {
-            return Ok(None);
-        };
-        stripped
-    } else {
-        path
-    };
-
-    if !is_safe_relative_path(relative) {
-        bail!(
-            "protected path must be relative to the project root: {}",
-            path.display()
-        );
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            _ => bail!(
-                "protected path must stay inside the project root: {}",
-                path.display()
-            ),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(normalized.to_string_lossy().replace('\\', "/")))
-}
-
-fn normalize_allowed_paths(paths: &[String]) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .filter_map(|path| normalize_allowed_path(path).transpose())
-        .collect()
-}
-
-fn normalize_allowed_path(path: &str) -> Result<Option<String>> {
-    let path = path.trim();
-    if path.is_empty() {
-        return Ok(None);
-    }
-
-    let directory_rule = path.ends_with('/') || path.ends_with("/**");
-    let path = path
-        .strip_suffix("/**")
-        .unwrap_or(path)
-        .trim_end_matches('/');
-    let path = Path::new(path);
-
-    if !is_safe_relative_path(path) {
-        bail!(
-            "file_access.allowed path must be relative to the project root: {}",
-            path.display()
-        );
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            _ => bail!(
-                "file_access.allowed path must stay inside the project root: {}",
-                path.display()
-            ),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Ok(None);
-    }
-
-    let mut normalized = normalized.to_string_lossy().replace('\\', "/");
-    if directory_rule || Path::new(&normalized).is_dir() {
-        normalized.push('/');
-    }
-
-    Ok(Some(normalized))
-}
-
-fn is_specforge_owned_path(path: &Path, protected_paths: &[String]) -> bool {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    if protected_paths
-        .iter()
-        .any(|protected_path| protected_path == &normalized)
-    {
-        return true;
-    }
-
-    if path
-        .components()
-        .next()
-        .is_some_and(|component| component.as_os_str() == ".specforge")
-    {
-        return true;
-    }
-
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-
-    matches!(file_name, "spec.adoc" | "spec.asciidoc")
-        || file_name.ends_with(".spec.adoc")
-        || file_name.ends_with(".spec.asciidoc")
-}
-
 fn ensure_trailing_newline(text: &str) -> String {
     if text.ends_with('\n') {
         text.to_string()
@@ -1549,6 +1213,7 @@ mod tests {
         PatchFileChange, PatchOperation, validate_apply_patch,
         validate_apply_patch_with_protected_paths,
     };
+    use super::path_policy::is_safe_relative_path;
     use super::*;
     use rig::{OneOrMany, message::ToolFunction};
 

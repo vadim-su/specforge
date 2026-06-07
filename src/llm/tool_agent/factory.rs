@@ -7,8 +7,8 @@ use rig::{
 use crate::provider::{Provider, default_model};
 
 use super::{
-    agent::{RuntimeAgent, build_agent},
     config::RigAgentConfig,
+    runtime::{RuntimeAgent, build_agent},
 };
 
 #[derive(Debug, Clone)]

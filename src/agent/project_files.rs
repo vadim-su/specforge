@@ -53,7 +53,7 @@ pub(super) fn inspect_file(
     };
 
     let requested_path = Path::new(path);
-    if !super::is_safe_relative_path(requested_path) {
+    if !super::path_policy::is_safe_relative_path(requested_path) {
         return Ok(json!({
             "ok": false,
             "error": "path must be relative and stay inside the repository",
@@ -66,7 +66,7 @@ pub(super) fn inspect_file(
             "error": "path must name a repository file",
         }));
     }
-    if super::is_specforge_owned_path(Path::new(&path), protected_paths) {
+    if super::path_policy::is_specforge_owned_path(Path::new(&path), protected_paths) {
         return Ok(json!({
             "ok": false,
             "error": "path is reserved for SpecForge state/spec management",
@@ -180,7 +180,7 @@ fn collect_project_files(
                 .unwrap_or(path.as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
-            if super::is_specforge_owned_path(Path::new(&relative), protected_paths) {
+            if super::path_policy::is_specforge_owned_path(Path::new(&relative), protected_paths) {
                 continue;
             }
             if !file_access_allows_path(&relative, allowed_paths) {

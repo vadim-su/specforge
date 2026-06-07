@@ -142,7 +142,7 @@ fn validate_patch_path_with_protected_paths(
     }
 
     let path = Path::new(path);
-    if !super::is_safe_relative_path(path) {
+    if !super::path_policy::is_safe_relative_path(path) {
         return Err(format!(
             "patch path `{}` must be relative and stay inside the project",
             path.display()
@@ -155,7 +155,7 @@ fn validate_patch_path_with_protected_paths(
     {
         return Err("patch must not write inside .git".to_string());
     }
-    if super::is_specforge_owned_path(path, protected_paths) {
+    if super::path_policy::is_specforge_owned_path(path, protected_paths) {
         return Err(format!(
             "patch must not modify SpecForge-owned path `{}`",
             path.display()

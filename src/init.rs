@@ -21,7 +21,7 @@ use crate::{
         CURRENT_MODEL, CURRENT_SPEC, ProjectCheckConfig, ProjectConfig, clear_project_config,
         project_config_path, write_project_config,
     },
-    llm::{LlmClient, LlmPrompt},
+    llm::{LlmClient, LlmPrompt, strip_code_fence},
     prompts,
     provider::Provider,
     spec::{ParsedSpec, Severity, parse_spec, print_diagnostics, validate_model},
@@ -59,7 +59,7 @@ pub async fn init_spec(options: InitOptions) -> Result<()> {
                 temperature: Some(0.2),
             })
             .await?;
-        let source = strip_markdown_fence(&generated);
+        let source = strip_code_fence(&generated);
         let generated_config = generate_project_config(&client, &prose, &preferences).await?;
         (source, generated_config)
     };
@@ -629,26 +629,6 @@ fn init_user_prompt(prose: &str, preferences: &InitPreferences) -> String {
     )
 }
 
-fn strip_markdown_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return ensure_trailing_newline(trimmed);
-    };
-    let Some(end) = rest.rfind("```") else {
-        return ensure_trailing_newline(trimmed);
-    };
-
-    let inner = &rest[..end];
-    let inner = inner
-        .strip_prefix("asciidoc\n")
-        .or_else(|| inner.strip_prefix("adoc\n"))
-        .or_else(|| inner.strip_prefix("AsciiDoc\n"))
-        .unwrap_or(inner)
-        .trim();
-
-    ensure_trailing_newline(inner)
-}
-
 fn strip_json_fence(text: &str) -> &str {
     let trimmed = text.trim();
     let Some(rest) = trimmed.strip_prefix("```") else {
@@ -678,14 +658,6 @@ fn starter_template(output: &Path) -> String {
     format!(
         "= Project Specification\n:spec-version: 1\n:project-id: {project_id}\n\n== Project\n\nName:: Project\nLanguage:: Unknown\n\nInitial project specification.\n"
     )
-}
-
-fn ensure_trailing_newline(text: &str) -> String {
-    if text.ends_with('\n') {
-        text.to_string()
-    } else {
-        format!("{text}\n")
-    }
 }
 
 fn slugify(value: &str) -> String {

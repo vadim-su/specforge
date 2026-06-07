@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    llm::{LlmClient, LlmPrompt},
+    llm::{LlmClient, LlmPrompt, strip_code_fence},
     prompts,
     provider::Provider,
     spec::{ParsedSpec, Severity, needs_tag_normalization, parse_spec, validate_model},
@@ -35,7 +35,7 @@ pub async fn normalize_spec_tags(
             temperature: Some(0.1),
         })
         .await?;
-    let source = strip_markdown_fence(&generated);
+    let source = strip_code_fence(&generated);
     let model = parse_spec(&source);
 
     let diagnostics = validate_model(&model);
@@ -58,32 +58,4 @@ fn sync_user_prompt(baseline: &str, current: &str) -> String {
         baseline.trim(),
         current.trim()
     )
-}
-
-fn strip_markdown_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return ensure_trailing_newline(trimmed);
-    };
-    let Some(end) = rest.rfind("```") else {
-        return ensure_trailing_newline(trimmed);
-    };
-
-    let inner = &rest[..end];
-    let inner = inner
-        .strip_prefix("asciidoc\n")
-        .or_else(|| inner.strip_prefix("adoc\n"))
-        .or_else(|| inner.strip_prefix("AsciiDoc\n"))
-        .unwrap_or(inner)
-        .trim();
-
-    ensure_trailing_newline(inner)
-}
-
-fn ensure_trailing_newline(text: &str) -> String {
-    if text.ends_with('\n') {
-        text.to_string()
-    } else {
-        format!("{text}\n")
-    }
 }
