@@ -96,6 +96,11 @@ pub enum Command {
         #[arg(long)]
         no_tui: bool,
     },
+    /// Run project tests or ask the agent to improve test coverage.
+    Test {
+        #[command(subcommand)]
+        command: TestCommand,
+    },
     /// Ask an LLM for questions that can improve a spec and project direction.
     Assist {
         #[command(subcommand)]
@@ -123,6 +128,38 @@ pub enum AssistCommand {
         #[arg(long)]
         model: Option<String>,
         /// Print generated questions instead of opening the ratatui questionnaire.
+        #[arg(long)]
+        no_tui: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TestCommand {
+    /// Run configured project checks from .specforge/config.yaml.
+    Run,
+    /// Add or improve tests for a described area, files, or spec items.
+    Cover {
+        /// Plain-text test coverage target. If omitted, cover reads stdin when piped.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        target: Vec<String>,
+        /// File path that should receive or drive additional test coverage.
+        #[arg(short, long = "file", value_name = "PATH")]
+        files: Vec<PathBuf>,
+        /// Spec item id or title that should receive additional test coverage.
+        #[arg(long = "item", visible_alias = "entity", value_name = "ID_OR_TITLE")]
+        spec_items: Vec<String>,
+        /// Spec file used to resolve --item/--entity references.
+        #[arg(long, default_value = DEFAULT_SPEC)]
+        spec: PathBuf,
+        /// Maximum LLM/tool turns for the code change agent. Use 0 for no turn budget.
+        #[arg(long)]
+        agent_steps: Option<usize>,
+        #[arg(long, default_value_t = Provider::Openai)]
+        provider: Provider,
+        /// Provider model name. Defaults depend on --provider.
+        #[arg(long)]
+        model: Option<String>,
+        /// Disable the ratatui progress view.
         #[arg(long)]
         no_tui: bool,
     },

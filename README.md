@@ -18,6 +18,8 @@ and driving implementation work from the accepted changes.
   agent for the detected changes.
 - Ask for targeted product and engineering questions that can expand a spec.
 - Apply ad-hoc code fixes with the code change agent.
+- Run configured project checks and ask the agent to add or improve tests for
+  plain-text targets, files, or spec items.
 - Use OpenAI, Anthropic, Ollama, or ChatGPT providers.
 
 ## Installation
@@ -68,6 +70,21 @@ Synchronize spec changes and skip agent execution:
 
 ```sh
 specforge sync spec.adoc --skip-agent
+```
+
+Run configured project checks:
+
+```sh
+specforge test run
+```
+
+Ask the agent to improve test coverage for a plain-text target, a file, or a
+spec item:
+
+```sh
+specforge test cover "sync rejects invalid specs"
+specforge test cover --file src/sync.rs
+specforge test cover --item feature-sync
 ```
 
 Answer targeted questions in a terminal questionnaire and get conclusions for
@@ -140,6 +157,8 @@ specforge check [SPEC]
 specforge model [SPEC]
 specforge diff [SPEC]
 specforge sync [SPEC] [--yes] [--skip-agent]
+specforge test run
+specforge test cover [TARGET...] [--file PATH] [--item ID_OR_TITLE] [--spec spec.adoc]
 specforge assist expand [SPEC]
 specforge fix [REQUEST...]
 specforge accept [SPEC]

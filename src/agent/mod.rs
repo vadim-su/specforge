@@ -24,10 +24,12 @@ mod patch;
 mod project_files;
 mod tools;
 
-use checks::{project_check_plan, run_project_checks};
+use checks::project_check_plan;
 use patch::{ProposedPatch, apply_proposed_patch, validate_apply_patch_with_protected_paths};
 use project_files::{inspect_file, list_project_files};
 use tools::{code_change_tools, development_tools};
+
+pub use checks::{CheckRun, ProjectCheckRun, run_project_checks};
 
 const DEFAULT_AGENT_TURN_BUDGET: usize = 32;
 const UNBOUNDED_AGENT_TURN_BUDGET: usize = 0;
@@ -110,6 +112,7 @@ enum TaskStatus {
 enum TaskKind {
     SpecSync,
     CodeChange,
+    TestCoverage,
 }
 
 fn default_task_kind() -> TaskKind {
@@ -490,9 +493,54 @@ pub async fn run_code_change_agent_with_events(
     options: DevelopmentAgentOptions,
     mut events: impl FnMut(DevelopmentAgentEvent),
 ) -> Result<DevelopmentAgentRun> {
+    run_code_change_task_with_events(
+        request,
+        options,
+        TaskKind::CodeChange,
+        "fix",
+        "code change",
+        "fix",
+        &mut events,
+    )
+    .await
+}
+
+pub async fn run_test_coverage_agent(
+    request: &str,
+    options: DevelopmentAgentOptions,
+) -> Result<DevelopmentAgentRun> {
+    run_test_coverage_agent_with_events(request, options, |_| {}).await
+}
+
+pub async fn run_test_coverage_agent_with_events(
+    request: &str,
+    options: DevelopmentAgentOptions,
+    mut events: impl FnMut(DevelopmentAgentEvent),
+) -> Result<DevelopmentAgentRun> {
+    run_code_change_task_with_events(
+        request,
+        options,
+        TaskKind::TestCoverage,
+        "test-cover",
+        "test coverage",
+        "test cover",
+        &mut events,
+    )
+    .await
+}
+
+async fn run_code_change_task_with_events(
+    request: &str,
+    options: DevelopmentAgentOptions,
+    task_kind: TaskKind,
+    task_prefix: &str,
+    task_label: &str,
+    resume_command: &str,
+    events: &mut impl FnMut(DevelopmentAgentEvent),
+) -> Result<DevelopmentAgentRun> {
     let request = request.trim();
     if request.is_empty() {
-        bail!("fix request must not be empty");
+        bail!("{task_label} request must not be empty");
     }
 
     let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
@@ -506,7 +554,7 @@ pub async fn run_code_change_agent_with_events(
         tools: code_change_tools(),
     })?;
     let request_hash = short_hash(request);
-    let task_id = timestamped_task_id("fix", &request_hash)?;
+    let task_id = timestamped_task_id(task_prefix, &request_hash)?;
     let task_dir = Path::new(TASKS_DIR).join(&task_id);
     fs::create_dir_all(&task_dir)
         .with_context(|| format!("failed to create {}", task_dir.display()))?;
@@ -517,7 +565,7 @@ pub async fn run_code_change_agent_with_events(
         allowed_paths: allowed_paths.clone(),
     };
     let mut state = AgentTaskState::new(
-        TaskKind::CodeChange,
+        task_kind,
         task_id,
         "",
         &request_hash,
@@ -544,7 +592,7 @@ pub async fn run_code_change_agent_with_events(
         max_steps: state.max_steps,
     });
     events(DevelopmentAgentEvent::Log(format!(
-        "Created code change task {}",
+        "Created {task_label} task {}",
         task_dir.display()
     )));
 
@@ -558,13 +606,15 @@ pub async fn run_code_change_agent_with_events(
         &context,
         &mut patch_history,
         &mut final_answer,
-        &mut events,
+        &mut *events,
     )
     .await?;
 
     finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;
     let final_answer = final_answer.unwrap_or_else(|| {
-        "Agent paused after the configured turn budget. Run fix again to resume.".to_string()
+        format!(
+            "Agent paused after the configured turn budget. Run {resume_command} again to resume."
+        )
     });
     events(DevelopmentAgentEvent::Finished {
         completed,
@@ -583,6 +633,10 @@ pub fn has_pending_code_change_task() -> Result<bool> {
     latest_pending_task_dir(TaskKind::CodeChange).map(|task_dir| task_dir.is_some())
 }
 
+pub fn has_pending_test_coverage_task() -> Result<bool> {
+    latest_pending_task_dir(TaskKind::TestCoverage).map(|task_dir| task_dir.is_some())
+}
+
 pub async fn resume_pending_code_change_task(
     options: DevelopmentAgentOptions,
 ) -> Result<Option<DevelopmentAgentRun>> {
@@ -593,7 +647,41 @@ pub async fn resume_pending_code_change_task_with_events(
     options: DevelopmentAgentOptions,
     mut events: impl FnMut(DevelopmentAgentEvent),
 ) -> Result<Option<DevelopmentAgentRun>> {
-    let Some(task_dir) = latest_pending_task_dir(TaskKind::CodeChange)? else {
+    resume_pending_code_change_task_with_kind(
+        options,
+        TaskKind::CodeChange,
+        "code change",
+        &mut events,
+    )
+    .await
+}
+
+pub async fn resume_pending_test_coverage_task(
+    options: DevelopmentAgentOptions,
+) -> Result<Option<DevelopmentAgentRun>> {
+    resume_pending_test_coverage_task_with_events(options, |_| {}).await
+}
+
+pub async fn resume_pending_test_coverage_task_with_events(
+    options: DevelopmentAgentOptions,
+    mut events: impl FnMut(DevelopmentAgentEvent),
+) -> Result<Option<DevelopmentAgentRun>> {
+    resume_pending_code_change_task_with_kind(
+        options,
+        TaskKind::TestCoverage,
+        "test coverage",
+        &mut events,
+    )
+    .await
+}
+
+async fn resume_pending_code_change_task_with_kind(
+    options: DevelopmentAgentOptions,
+    task_kind: TaskKind,
+    task_label: &str,
+    events: &mut impl FnMut(DevelopmentAgentEvent),
+) -> Result<Option<DevelopmentAgentRun>> {
+    let Some(task_dir) = latest_pending_task_dir(task_kind)? else {
         return Ok(None);
     };
 
@@ -621,7 +709,7 @@ pub async fn resume_pending_code_change_task_with_events(
         max_steps: state.max_steps,
     });
     events(DevelopmentAgentEvent::Log(format!(
-        "Resuming code change task {}",
+        "Resuming {task_label} task {}",
         task_dir.display()
     )));
 
@@ -634,7 +722,7 @@ pub async fn resume_pending_code_change_task_with_events(
             &context,
             &mut patch_history,
             &mut final_answer,
-            &mut events,
+            &mut *events,
         )
         .await?;
         finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;

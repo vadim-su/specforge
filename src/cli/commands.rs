@@ -8,23 +8,28 @@ use anyhow::{Context, Result, bail};
 use specforge::{
     agent::{
         DevelopmentAgentOptions, DevelopmentAgentRun, TaskStepStatus, has_pending_code_change_task,
-        has_pending_development_task, resume_pending_code_change_task,
-        resume_pending_code_change_task_with_events, resume_pending_development_task,
-        resume_pending_development_task_with_events, run_code_change_agent,
-        run_code_change_agent_with_events, run_development_agent,
-        run_development_agent_with_events,
+        has_pending_development_task, has_pending_test_coverage_task,
+        resume_pending_code_change_task, resume_pending_code_change_task_with_events,
+        resume_pending_development_task, resume_pending_development_task_with_events,
+        resume_pending_test_coverage_task, resume_pending_test_coverage_task_with_events,
+        run_code_change_agent, run_code_change_agent_with_events, run_development_agent,
+        run_development_agent_with_events, run_project_checks, run_test_coverage_agent,
+        run_test_coverage_agent_with_events,
     },
     assist::{AssistExpandOptions, expand_spec},
     config::{CURRENT_MODEL, CURRENT_SPEC, load_project_config},
     diff::{diff_models, locate_diff_changes},
     init::{InitOptions, init_spec},
-    spec::{ParsedSpec, Severity, parse_spec, parse_spec_file, print_diagnostics, validate_model},
+    spec::{
+        ParsedSpec, Severity, SpecItem, parse_spec, parse_spec_file, print_diagnostics,
+        validate_model,
+    },
     state::write_current_state,
     sync::{SyncTagOptions, normalize_spec_tags},
 };
 
 use crate::cli::{
-    args::{AssistCommand, Cli, Command},
+    args::{AssistCommand, Cli, Command, TestCommand},
     color::Colors,
     diff_render::{print_diff, print_text_diff},
     tui::run_with_tui,
@@ -259,6 +264,56 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await?;
             print_agent_run("code change task", &run);
         }
+        Command::Test { command } => match command {
+            TestCommand::Run => {
+                let checks = run_project_checks()?;
+                print_project_check_run(&checks);
+                if !checks.success {
+                    bail!("project checks failed");
+                }
+            }
+            TestCommand::Cover {
+                target,
+                files,
+                spec_items,
+                spec,
+                agent_steps,
+                provider,
+                model,
+                no_tui,
+            } => {
+                if let Some(run) = resume_test_coverage_task_with_progress(
+                    DevelopmentAgentOptions {
+                        provider,
+                        model: model.clone(),
+                        max_steps: agent_steps,
+                        protected_paths: vec![spec.clone()],
+                        allowed_paths: agent_allowed_paths()?,
+                    },
+                    no_tui,
+                )
+                .await?
+                {
+                    print_agent_run("resumed test coverage task", &run);
+                    return Ok(());
+                }
+
+                let request = build_test_coverage_request(&target, &files, &spec_items, &spec)?;
+                let run = run_test_coverage_agent_with_progress(
+                    &request,
+                    DevelopmentAgentOptions {
+                        provider,
+                        model,
+                        max_steps: agent_steps,
+                        protected_paths: vec![spec],
+                        allowed_paths: agent_allowed_paths()?,
+                    },
+                    no_tui,
+                )
+                .await?;
+                print_agent_run("test coverage task", &run);
+            }
+        },
         Command::Assist { command } => match command {
             AssistCommand::Expand {
                 spec,
@@ -316,6 +371,44 @@ fn print_agent_run(label: &str, run: &DevelopmentAgentRun) {
     }
 }
 
+fn print_project_check_run(run: &specforge::agent::ProjectCheckRun) {
+    if let Some(reason) = &run.skipped_reason {
+        println!("test run: skipped: {reason}");
+        return;
+    }
+
+    println!("test run: {} check(s)", run.checks.len());
+    for check in &run.checks {
+        let status = if check.success {
+            "ok"
+        } else if check.timed_out {
+            "timed out"
+        } else {
+            "failed"
+        };
+        println!("{status}: {}", check.command.join(" "));
+        if !check.success {
+            if let Some(exit_code) = check.exit_code {
+                println!("  exit code: {exit_code}");
+            }
+            print_check_output("stdout", &check.stdout_tail);
+            print_check_output("stderr", &check.stderr_tail);
+        } else if let Some(reason) = &check.skipped_reason {
+            println!("  skipped: {reason}");
+        }
+    }
+}
+
+fn print_check_output(label: &str, output: &str) {
+    let output = output.trim_end();
+    if output.trim().is_empty() {
+        return;
+    }
+
+    println!("{label}:");
+    println!("{output}");
+}
+
 fn agent_allowed_paths() -> Result<Vec<String>> {
     Ok(load_project_config()?.file_access.allowed)
 }
@@ -355,6 +448,27 @@ async fn resume_code_change_task_with_progress(
     run_with_tui("SpecForge fix", |progress| async move {
         progress.log("Looking for a pending code change task");
         resume_pending_code_change_task_with_events(options, |event| {
+            progress.agent_event(event);
+        })
+        .await
+    })
+    .await
+}
+
+async fn resume_test_coverage_task_with_progress(
+    options: DevelopmentAgentOptions,
+    no_tui: bool,
+) -> Result<Option<DevelopmentAgentRun>> {
+    if !should_use_tui(no_tui) {
+        return resume_pending_test_coverage_task(options).await;
+    }
+    if !has_pending_test_coverage_task()? {
+        return Ok(None);
+    }
+
+    run_with_tui("SpecForge test cover", |progress| async move {
+        progress.log("Looking for a pending test coverage task");
+        resume_pending_test_coverage_task_with_events(options, |event| {
             progress.agent_event(event);
         })
         .await
@@ -402,6 +516,25 @@ async fn run_code_change_agent_with_progress(
     .await
 }
 
+async fn run_test_coverage_agent_with_progress(
+    request: &str,
+    options: DevelopmentAgentOptions,
+    no_tui: bool,
+) -> Result<DevelopmentAgentRun> {
+    if !should_use_tui(no_tui) {
+        return run_test_coverage_agent(request, options).await;
+    }
+
+    run_with_tui("SpecForge test cover", |progress| async move {
+        progress.log("Starting test coverage agent");
+        run_test_coverage_agent_with_events(request, options, |event| {
+            progress.agent_event(event);
+        })
+        .await
+    })
+    .await
+}
+
 fn should_use_tui(no_tui: bool) -> bool {
     !no_tui && io::stdout().is_terminal()
 }
@@ -426,6 +559,157 @@ fn read_fix_request(parts: &[String]) -> Result<String> {
     }
 
     Ok(request)
+}
+
+fn build_test_coverage_request(
+    target_parts: &[String],
+    files: &[PathBuf],
+    spec_items: &[String],
+    spec: &Path,
+) -> Result<String> {
+    let structured_target_count = files.len() + spec_items.len();
+    let target = read_test_coverage_target(target_parts, structured_target_count > 0)?;
+    let resolved_items = resolve_spec_items(spec_items, spec)?;
+
+    let mut request = String::new();
+    request.push_str(
+        "Add or improve automated test coverage for the requested area.\n\
+         Prefer test-only changes. Change production code only when a test reveals a real defect \
+         or when a minimal refactor for testability is necessary, and explain that choice in the final \
+         answer. Inspect the repository before deciding where tests belong. Use the configured \
+         project checks as the verification target.\n",
+    );
+
+    if let Some(target) = target {
+        request.push_str("\n<coverage-target>\n");
+        request.push_str(target.trim());
+        request.push_str("\n</coverage-target>\n");
+    }
+
+    if !files.is_empty() {
+        request.push_str("\n<target-files>\n");
+        for file in files {
+            request.push_str("- ");
+            request.push_str(&file.display().to_string());
+            request.push('\n');
+        }
+        request.push_str("</target-files>\n");
+    }
+
+    if !resolved_items.is_empty() {
+        request.push_str("\n<spec-items>\n");
+        for (query, item, source) in resolved_items {
+            request.push_str(&format!(
+                "## Query: {query}\n- id: {}\n- kind: {:?}\n- title: {}\n- lines: {}-{}\n\n",
+                item.id.as_deref().unwrap_or("<none>"),
+                item.kind,
+                item.title,
+                item.source_range.start_line,
+                item.source_range.end_line,
+            ));
+            request.push_str("```asciidoc\n");
+            request.push_str(source.trim());
+            request.push_str("\n```\n\n");
+        }
+        request.push_str("</spec-items>\n");
+    }
+
+    Ok(request)
+}
+
+fn read_test_coverage_target(
+    parts: &[String],
+    has_structured_targets: bool,
+) -> Result<Option<String>> {
+    let target = parts.join(" ");
+    if !target.trim().is_empty() {
+        return Ok(Some(target));
+    }
+
+    if !io::stdin().is_terminal() {
+        let mut target = String::new();
+        io::stdin()
+            .read_to_string(&mut target)
+            .context("failed to read test coverage target from stdin")?;
+        if !target.trim().is_empty() {
+            return Ok(Some(target));
+        }
+    }
+
+    if has_structured_targets {
+        return Ok(None);
+    }
+
+    bail!("test cover needs a target argument, --file, --item/--entity, or piped stdin");
+}
+
+fn resolve_spec_items(items: &[String], spec: &Path) -> Result<Vec<(String, SpecItem, String)>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parsed = parse_spec_file(spec)?;
+    items
+        .iter()
+        .map(|query| resolve_spec_item(query, &parsed))
+        .collect()
+}
+
+fn resolve_spec_item(query: &str, parsed: &ParsedSpec) -> Result<(String, SpecItem, String)> {
+    let query = query.trim();
+    if query.is_empty() {
+        bail!("spec item query must not be empty");
+    }
+
+    let matches = parsed
+        .model
+        .items
+        .iter()
+        .filter(|item| spec_item_matches(item, query))
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [item] => Ok((
+            query.to_string(),
+            (*item).clone(),
+            spec_item_source(&parsed.source, item),
+        )),
+        [] => bail!("spec item `{query}` was not found"),
+        matches => {
+            let labels = matches
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} ({})",
+                        item.id.as_deref().unwrap_or("<no id>"),
+                        item.title
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("spec item `{query}` is ambiguous: {labels}");
+        }
+    }
+}
+
+fn spec_item_matches(item: &SpecItem, query: &str) -> bool {
+    item.id.as_deref() == Some(query)
+        || item.title.eq_ignore_ascii_case(query)
+        || item.heading.eq_ignore_ascii_case(query)
+}
+
+fn spec_item_source(source: &str, item: &SpecItem) -> String {
+    source
+        .lines()
+        .skip(item.source_range.start_line.saturating_sub(1))
+        .take(
+            item.source_range
+                .end_line
+                .saturating_sub(item.source_range.start_line)
+                + 1,
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn enter_project_root(project_root: &Path) -> Result<()> {

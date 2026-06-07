@@ -12,14 +12,14 @@ use crate::config::{ProjectCheckConfig, load_project_config};
 const MAX_CHECK_OUTPUT_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct ProjectCheckRun {
+pub struct ProjectCheckRun {
     pub success: bool,
     pub skipped_reason: Option<String>,
     pub checks: Vec<CheckRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CheckRun {
+pub struct CheckRun {
     pub command: Vec<String>,
     pub success: bool,
     pub exit_code: Option<i32>,
@@ -62,7 +62,7 @@ pub(super) fn project_check_plan() -> Result<ProjectCheckPlan> {
     })
 }
 
-pub(super) fn run_project_checks() -> Result<ProjectCheckRun> {
+pub fn run_project_checks() -> Result<ProjectCheckRun> {
     let plan = project_check_plan()?;
     if let Some(reason) = plan.skipped_reason {
         return Ok(ProjectCheckRun {
