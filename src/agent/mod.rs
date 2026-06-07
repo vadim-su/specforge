@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fmt, fs,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -29,7 +29,8 @@ use patch::{ProposedPatch, apply_proposed_patch, validate_apply_patch_with_prote
 use project_files::{inspect_file, list_project_files};
 use tools::{code_change_tools, development_tools};
 
-const DEFAULT_MAX_AGENT_STEPS: usize = 6;
+const DEFAULT_AGENT_TURN_BUDGET: usize = 32;
+const UNBOUNDED_AGENT_TURN_BUDGET: usize = 0;
 
 #[derive(Debug)]
 pub struct DevelopmentAgentOptions {
@@ -112,6 +113,52 @@ enum TaskKind {
 
 fn default_task_kind() -> TaskKind {
     TaskKind::SpecSync
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTurnBudget {
+    Unbounded,
+    Limited(usize),
+}
+
+impl AgentTurnBudget {
+    fn from_cli(value: Option<usize>) -> Self {
+        match value {
+            Some(UNBOUNDED_AGENT_TURN_BUDGET) => Self::Unbounded,
+            Some(value) => Self::Limited(value.max(1)),
+            None => Self::Limited(DEFAULT_AGENT_TURN_BUDGET),
+        }
+    }
+
+    fn from_state(value: usize) -> Self {
+        match value {
+            UNBOUNDED_AGENT_TURN_BUDGET => Self::Unbounded,
+            value => Self::Limited(value.max(1)),
+        }
+    }
+
+    fn as_state_value(self) -> usize {
+        match self {
+            Self::Unbounded => UNBOUNDED_AGENT_TURN_BUDGET,
+            Self::Limited(value) => value,
+        }
+    }
+
+    fn exhausted_before_turn(self, turn: usize) -> bool {
+        match self {
+            Self::Unbounded => false,
+            Self::Limited(max_turns) => turn > max_turns,
+        }
+    }
+}
+
+impl fmt::Display for AgentTurnBudget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unbounded => write!(f, "unbounded"),
+            Self::Limited(value) => write!(f, "{value}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,7 +279,7 @@ pub async fn run_development_agent_with_events(
     options: DevelopmentAgentOptions,
     mut events: impl FnMut(DevelopmentAgentEvent),
 ) -> Result<DevelopmentAgentRun> {
-    let max_steps = options.max_steps.unwrap_or(DEFAULT_MAX_AGENT_STEPS).max(1);
+    let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_development_agent".to_string(),
@@ -256,7 +303,7 @@ pub async fn run_development_agent_with_events(
         task_id,
         &previous_current.model.document.content_hash,
         &target.model.document.content_hash,
-        max_steps,
+        turn_budget.as_state_value(),
         protected_paths,
     );
 
@@ -287,7 +334,7 @@ pub async fn run_development_agent_with_events(
     events(DevelopmentAgentEvent::TaskCreated {
         task_dir: task_dir.clone(),
         checklist: state.checklist.clone(),
-        max_steps,
+        max_steps: state.max_steps,
     });
     events(DevelopmentAgentEvent::Log(format!(
         "Created execution task {}",
@@ -310,7 +357,7 @@ pub async fn run_development_agent_with_events(
 
     finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;
     let final_answer = final_answer.unwrap_or_else(|| {
-        "Agent paused after the configured step limit. Run sync again to resume.".to_string()
+        "Agent paused after the configured turn budget. Run sync again to resume.".to_string()
     });
     events(DevelopmentAgentEvent::Finished {
         completed,
@@ -403,7 +450,7 @@ pub async fn resume_pending_development_task_with_events(
         .await?;
         finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;
         let final_answer_text = final_answer.clone().unwrap_or_else(|| {
-            "Task resumed and paused after the configured step limit.".to_string()
+            "Task resumed and paused after the configured turn budget.".to_string()
         });
         events(DevelopmentAgentEvent::Finished {
             completed,
@@ -415,7 +462,7 @@ pub async fn resume_pending_development_task_with_events(
     Ok(Some(DevelopmentAgentRun {
         task_dir,
         final_answer: final_answer.unwrap_or_else(|| {
-            "Task resumed and paused after the configured step limit.".to_string()
+            "Task resumed and paused after the configured turn budget.".to_string()
         }),
         checklist: state.checklist,
     }))
@@ -438,7 +485,7 @@ pub async fn run_code_change_agent_with_events(
         bail!("fix request must not be empty");
     }
 
-    let max_steps = options.max_steps.unwrap_or(DEFAULT_MAX_AGENT_STEPS).max(1);
+    let turn_budget = AgentTurnBudget::from_cli(options.max_steps);
     let protected_paths = normalize_protected_paths(&options.protected_paths)?;
     let agent = RigAgentFactory::new(options.provider, options.model).build(RigAgentConfig {
         name: "specforge_code_change_agent".to_string(),
@@ -462,7 +509,7 @@ pub async fn run_code_change_agent_with_events(
         task_id,
         "",
         &request_hash,
-        max_steps,
+        turn_budget.as_state_value(),
         protected_paths,
     );
     let mut thread = AgentThread {
@@ -481,7 +528,7 @@ pub async fn run_code_change_agent_with_events(
     events(DevelopmentAgentEvent::TaskCreated {
         task_dir: task_dir.clone(),
         checklist: state.checklist.clone(),
-        max_steps,
+        max_steps: state.max_steps,
     });
     events(DevelopmentAgentEvent::Log(format!(
         "Created code change task {}",
@@ -504,7 +551,7 @@ pub async fn run_code_change_agent_with_events(
 
     finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;
     let final_answer = final_answer.unwrap_or_else(|| {
-        "Agent paused after the configured step limit. Run fix again to resume.".to_string()
+        "Agent paused after the configured turn budget. Run fix again to resume.".to_string()
     });
     events(DevelopmentAgentEvent::Finished {
         completed,
@@ -578,7 +625,7 @@ pub async fn resume_pending_code_change_task_with_events(
         .await?;
         finish_task(&task_dir, &mut state, final_answer.as_deref(), completed)?;
         let final_answer_text = final_answer.clone().unwrap_or_else(|| {
-            "Task resumed and paused after the configured step limit.".to_string()
+            "Task resumed and paused after the configured turn budget.".to_string()
         });
         events(DevelopmentAgentEvent::Finished {
             completed,
@@ -590,7 +637,7 @@ pub async fn resume_pending_code_change_task_with_events(
     Ok(Some(DevelopmentAgentRun {
         task_dir,
         final_answer: final_answer.unwrap_or_else(|| {
-            "Task resumed and paused after the configured step limit.".to_string()
+            "Task resumed and paused after the configured turn budget.".to_string()
         }),
         checklist: state.checklist,
     }))
@@ -613,14 +660,18 @@ async fn run_agent_loop(
     ));
     events(DevelopmentAgentEvent::Log("Agent loop started".to_string()));
 
-    for step in 1..=state.max_steps {
+    let turn_budget = AgentTurnBudget::from_state(state.max_steps);
+    let mut step = 1;
+    loop {
+        if turn_budget.exhausted_before_turn(step) {
+            break;
+        }
         events(DevelopmentAgentEvent::StepStarted {
             step,
             max_steps: state.max_steps,
         });
         events(DevelopmentAgentEvent::Log(format!(
-            "Step {step}/{}: requesting model turn",
-            state.max_steps
+            "Turn {step}: requesting model turn"
         )));
         let Some(prompt) = thread.messages.pop() else {
             bail!("agent thread has no prompt message");
@@ -644,15 +695,13 @@ async fn run_agent_loop(
         if tool_calls.is_empty() {
             *final_answer = Some(turn.text);
             events(DevelopmentAgentEvent::Log(format!(
-                "Step {step}/{}: final response received",
-                state.max_steps
+                "Turn {step}: final response received"
             )));
             return Ok(true);
         }
 
         events(DevelopmentAgentEvent::Log(format!(
-            "Step {step}/{}: tool calls: {}",
-            state.max_steps,
+            "Turn {step}: tool calls: {}",
             tool_call_names.join(", ")
         )));
         for call in &tool_calls {
@@ -676,11 +725,13 @@ async fn run_agent_loop(
                 break;
             }
         }
+
+        step += 1;
     }
 
     if final_answer.is_none() {
         *final_answer = Some(
-            "Agent paused after the configured step limit before producing a final response."
+            "Agent paused after the configured turn budget before producing a final response."
                 .to_string(),
         );
     }
@@ -1290,5 +1341,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.kind, TaskKind::SpecSync);
+    }
+
+    #[test]
+    fn agent_turn_budget_uses_default_when_unspecified() {
+        assert_eq!(
+            AgentTurnBudget::from_cli(None),
+            AgentTurnBudget::Limited(DEFAULT_AGENT_TURN_BUDGET)
+        );
+    }
+
+    #[test]
+    fn agent_turn_budget_preserves_positive_cli_value() {
+        assert_eq!(
+            AgentTurnBudget::from_cli(Some(12)),
+            AgentTurnBudget::Limited(12)
+        );
+    }
+
+    #[test]
+    fn agent_turn_budget_allows_unbounded_cli_value() {
+        let budget = AgentTurnBudget::from_cli(Some(0));
+
+        assert_eq!(budget, AgentTurnBudget::Unbounded);
+        assert_eq!(budget.as_state_value(), 0);
+        assert!(!budget.exhausted_before_turn(usize::MAX));
     }
 }

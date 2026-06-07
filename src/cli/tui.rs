@@ -23,6 +23,7 @@ pub enum ProgressEvent {
         total: usize,
         label: String,
     },
+    Label(String),
     Tasks(Vec<TaskChecklistItem>),
     Log(String),
     Finished {
@@ -48,6 +49,10 @@ impl ProgressReporter {
         self.send(ProgressEvent::Tasks(tasks));
     }
 
+    pub fn label(&self, label: impl Into<String>) {
+        self.send(ProgressEvent::Label(label.into()));
+    }
+
     pub fn log(&self, line: impl Into<String>) {
         self.send(ProgressEvent::Log(line.into()));
     }
@@ -57,36 +62,32 @@ impl ProgressReporter {
             DevelopmentAgentEvent::TaskCreated {
                 task_dir,
                 checklist,
-                max_steps,
+                max_steps: _,
             } => {
-                self.progress(0, max_steps, "Execution task created");
                 self.tasks(checklist);
+                self.label("Execution task created");
                 self.log(format!("Task: {}", task_dir.display()));
             }
             DevelopmentAgentEvent::TaskResumed {
                 task_dir,
                 checklist,
-                max_steps,
+                max_steps: _,
             } => {
-                self.progress(0, max_steps, "Execution task resumed");
                 self.tasks(checklist);
+                self.label("Execution task resumed");
                 self.log(format!("Task: {}", task_dir.display()));
             }
             DevelopmentAgentEvent::ChecklistUpdated(checklist) => {
                 self.tasks(checklist);
             }
-            DevelopmentAgentEvent::StepStarted { step, max_steps } => {
-                self.progress(
-                    step.saturating_sub(1),
-                    max_steps,
-                    format!("Agent step {step}/{max_steps}"),
-                );
+            DevelopmentAgentEvent::StepStarted { step, max_steps: _ } => {
+                self.label(format!("Agent turn {step}"));
             }
             DevelopmentAgentEvent::AgentTurnCompleted { step, tool_calls } => {
                 if tool_calls.is_empty() {
-                    self.log(format!("Step {step}: model returned a final answer"));
+                    self.log(format!("Turn {step}: model returned a final answer"));
                 } else {
-                    self.log(format!("Step {step}: {}", tool_calls.join(", ")));
+                    self.log(format!("Turn {step}: {}", tool_calls.join(", ")));
                 }
             }
             DevelopmentAgentEvent::ToolStarted { name } => {
@@ -249,8 +250,12 @@ impl TuiApp {
                 self.progress_total = total.max(1);
                 self.progress_label = label;
             }
+            ProgressEvent::Label(label) => {
+                self.progress_label = label;
+            }
             ProgressEvent::Tasks(tasks) => {
                 self.tasks = tasks;
+                self.update_task_progress();
             }
             ProgressEvent::Log(line) => {
                 self.logs.extend(line.lines().map(str::to_string));
@@ -291,6 +296,18 @@ impl TuiApp {
         }
 
         (self.progress_current as f64 / self.progress_total as f64).clamp(0.0, 1.0)
+    }
+
+    fn update_task_progress(&mut self) {
+        let total = self.tasks.len().max(1);
+        let current = self
+            .tasks
+            .iter()
+            .filter(|item| item.status == TaskStepStatus::Completed)
+            .count();
+
+        self.progress_current = current.min(total);
+        self.progress_total = total;
     }
 }
 

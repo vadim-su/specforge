@@ -65,7 +65,7 @@ pub enum Command {
         /// Accept the spec without starting the codegen agent.
         #[arg(long)]
         skip_agent: bool,
-        /// Maximum LLM/tool loop steps for the codegen agent.
+        /// Maximum LLM/tool turns for the codegen agent. Use 0 for no turn budget.
         #[arg(long)]
         agent_steps: Option<usize>,
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
@@ -84,7 +84,7 @@ pub enum Command {
         /// Change request. If omitted, fix reads stdin when piped.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         request: Vec<String>,
-        /// Maximum LLM/tool loop steps for the code change agent.
+        /// Maximum LLM/tool turns for the code change agent. Use 0 for no turn budget.
         #[arg(long)]
         agent_steps: Option<usize>,
         #[arg(long, default_value_t = Provider::Openai)]
