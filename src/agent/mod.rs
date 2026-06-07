@@ -24,7 +24,7 @@ mod patch;
 mod project_files;
 mod tools;
 
-use checks::run_project_checks;
+use checks::{project_check_plan, run_project_checks};
 use patch::{ProposedPatch, apply_proposed_patch, validate_apply_patch_with_protected_paths};
 use project_files::{inspect_file, list_project_files};
 use tools::{code_change_tools, development_tools};
@@ -466,7 +466,7 @@ pub async fn run_code_change_agent_with_events(
         protected_paths,
     );
     let mut thread = AgentThread {
-        messages: vec![Message::user(code_change_user_message(request))],
+        messages: vec![Message::user(code_change_user_message(request)?)],
     };
 
     write_task_state(&task_dir, &state)?;
@@ -830,18 +830,22 @@ fn latest_pending_task_dir(kind: TaskKind) -> Result<Option<PathBuf>> {
     Ok(pending.pop())
 }
 
-fn code_change_user_message(request: &str) -> String {
-    format!(
-        "Apply this ad-hoc code change request. Inspect the repository before making repo-specific claims.\n\n<user-request>\n{}\n</user-request>",
-        request.trim()
-    )
+fn code_change_user_message(request: &str) -> Result<String> {
+    let check_plan = project_check_plan()?;
+    Ok(format!(
+        "Apply this ad-hoc code change request. Inspect the repository before making repo-specific claims. Prepare a concise verification plan before proposing patches.\n\n<user-request>\n{}\n</user-request>\n\n<project-check-plan>\n{}\n</project-check-plan>",
+        request.trim(),
+        serde_json::to_string_pretty(&check_plan)?
+    ))
 }
 
 fn initial_user_message(target: &ParsedSpec, diff: &Value) -> Result<String> {
+    let check_plan = project_check_plan()?;
     Ok(format!(
-        "The spec has been stored as the new current state. Build a repo-specific implementation plan, using tools before making repo-specific claims.\n\n<target-spec-model>\n{}\n</target-spec-model>\n\n<semantic-diff>\n{}\n</semantic-diff>",
+        "The spec has been stored as the new current state. Build a repo-specific implementation plan, using tools before making repo-specific claims. Prepare a concise verification plan before proposing patches.\n\n<target-spec-model>\n{}\n</target-spec-model>\n\n<semantic-diff>\n{}\n</semantic-diff>\n\n<project-check-plan>\n{}\n</project-check-plan>",
         serde_json::to_string_pretty(&target.model)?,
-        serde_json::to_string_pretty(diff)?
+        serde_json::to_string_pretty(diff)?,
+        serde_json::to_string_pretty(&check_plan)?
     ))
 }
 

@@ -23,7 +23,7 @@ pub(super) struct ProposedPatch {
     pub summary: String,
     pub patch: String,
     pub changes: Vec<PatchFileChange>,
-    pub check: Option<super::checks::CheckRun>,
+    pub check: Option<super::checks::ProjectCheckRun>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

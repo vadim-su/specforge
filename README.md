@@ -1,0 +1,126 @@
+<p align="center">
+  <img src="assets/specforge-logo.png" alt="SpecForge logo" width="720">
+</p>
+
+# SpecForge
+
+SpecForge is a spec-driven project state tool for turning product ideas into a
+canonical project spec, validating that spec, diffing it against stored state,
+and driving implementation work from the accepted changes.
+
+## Features
+
+- Initialize `spec.adoc` from prose with an LLM or a deterministic template.
+- Validate a restricted AsciiDoc spec model before accepting changes.
+- Print normalized spec models as JSON for inspection and automation.
+- Diff the current spec against `.specforge/state/current.adoc`.
+- Normalize spec tags, accept the new state, and optionally run the development
+  agent for the detected changes.
+- Apply ad-hoc code fixes with the code change agent.
+- Use OpenAI, Anthropic, Ollama, or ChatGPT providers.
+
+## Installation
+
+```sh
+cargo install --path .
+```
+
+Or run the CLI directly from the repository:
+
+```sh
+cargo run -- --help
+```
+
+## Quick Start
+
+Create a starter spec without an LLM:
+
+```sh
+specforge init --template --output spec.adoc
+```
+
+Validate the spec:
+
+```sh
+specforge check spec.adoc
+```
+
+Inspect the parsed model:
+
+```sh
+specforge model spec.adoc
+```
+
+Accept the current spec as project state:
+
+```sh
+specforge accept spec.adoc
+```
+
+Show the next diff:
+
+```sh
+specforge diff spec.adoc
+```
+
+Synchronize spec changes and skip agent execution:
+
+```sh
+specforge sync spec.adoc --skip-agent
+```
+
+## LLM Providers
+
+Commands that call an LLM accept `--provider` and `--model`:
+
+```sh
+specforge init idea.md --provider openai --model gpt-5-nano
+specforge sync spec.adoc --provider anthropic
+specforge fix "Add input validation to the sync flow" --provider ollama
+```
+
+Provider setup depends on the selected backend:
+
+- `openai`: set `OPENAI_API_KEY`.
+- `anthropic`: set `ANTHROPIC_API_KEY`.
+- `ollama`: set `OLLAMA_API_BASE_URL` if not using localhost.
+- `chatgpt`: set `CHATGPT_ACCESS_TOKEN` or complete OAuth.
+
+## Project Checks
+
+SpecForge validates agent-applied patches with commands from
+`.specforge/config.yaml`. During LLM-backed `init`, SpecForge asks the model to
+infer this config from the project idea and selected preferences:
+
+```yaml
+checks:
+  - command: ["cargo", "test", "--color", "never"]
+    timeout_seconds: 120
+```
+
+When no checks are configured, project checks are skipped. The agent also
+receives the active check plan before generating patches.
+
+## CLI Commands
+
+```text
+specforge init [INPUT] [--output spec.adoc] [--template] [--force]
+specforge check [SPEC]
+specforge model [SPEC]
+specforge diff [SPEC]
+specforge sync [SPEC] [--yes] [--skip-agent]
+specforge fix [REQUEST...]
+specforge accept [SPEC]
+```
+
+Use `--project-root DIR` with any command to run against another project root.
+
+## Project State
+
+SpecForge writes accepted state under `.specforge/state/`. Generated or resumed
+agent tasks live under `.specforge/tasks/`. The agent file tools intentionally
+exclude `.git`, `target`, `.specforge`, and SpecForge-owned spec files.
+
+## License
+
+SpecForge is licensed under the [MIT License](LICENSE).

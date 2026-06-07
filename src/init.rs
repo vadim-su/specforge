@@ -17,7 +17,10 @@ use ratatui::{
 use serde::Deserialize;
 
 use crate::{
-    config::{CURRENT_MODEL, CURRENT_SPEC},
+    config::{
+        CURRENT_MODEL, CURRENT_SPEC, ProjectCheckConfig, ProjectConfig, clear_project_config,
+        project_config_path, write_project_config,
+    },
     llm::{LlmClient, LlmPrompt},
     prompts,
     provider::Provider,
@@ -40,10 +43,11 @@ pub async fn init_spec(options: InitOptions) -> Result<()> {
     ensure_init_can_write(&options.output, options.force)?;
     if options.force {
         clear_current_state()?;
+        clear_project_config()?;
     }
 
-    let source = if options.template {
-        starter_template(&options.output)
+    let (source, generated_config) = if options.template {
+        (starter_template(&options.output), ProjectConfig::default())
     } else {
         let prose = read_init_input(options.input.as_deref())?;
         let client = LlmClient::new(options.provider, options.model);
@@ -55,7 +59,9 @@ pub async fn init_spec(options: InitOptions) -> Result<()> {
                 temperature: Some(0.2),
             })
             .await?;
-        strip_markdown_fence(&generated)
+        let source = strip_markdown_fence(&generated);
+        let generated_config = generate_project_config(&client, &prose, &preferences).await?;
+        (source, generated_config)
     };
 
     let parsed = ParsedSpec {
@@ -74,8 +80,14 @@ pub async fn init_spec(options: InitOptions) -> Result<()> {
 
     fs::write(&options.output, &parsed.source)
         .with_context(|| format!("failed to write {}", options.output.display()))?;
+    write_generated_project_config(&generated_config)?;
 
     println!("initialized: {}", options.output.display());
+    if generated_config.checks.is_empty() {
+        println!("project checks: not configured");
+    } else {
+        println!("project checks: {}", project_config_path().display());
+    }
     println!(
         "current state: not created yet; run `specforge sync {}`",
         options.output.display()
@@ -127,6 +139,19 @@ struct InitQuestion {
     prompt: String,
     #[serde(default)]
     options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InitChecksPlan {
+    #[serde(default)]
+    checks: Vec<InitCheckPlanItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InitCheckPlanItem {
+    #[serde(default)]
+    command: Vec<String>,
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -248,6 +273,14 @@ fn ensure_init_can_write(output: &Path, force: bool) -> Result<()> {
         bail!(".specforge current state already exists; pass --force to reinitialize it");
     }
 
+    let config_path = project_config_path();
+    if !force && config_path.exists() {
+        bail!(
+            "{} already exists; pass --force to overwrite it",
+            config_path.display()
+        );
+    }
+
     Ok(())
 }
 
@@ -331,6 +364,99 @@ fn normalize_init_question(mut question: InitQuestion) -> Option<InitQuestion> {
 fn parse_init_questionnaire_plan(response: &str) -> Result<InitQuestionnairePlan> {
     serde_json::from_str(strip_json_fence(response))
         .context("failed to parse init questionnaire JSON from LLM")
+}
+
+async fn generate_project_config(
+    client: &LlmClient,
+    prose: &str,
+    preferences: &InitPreferences,
+) -> Result<ProjectConfig> {
+    let response = client
+        .complete(LlmPrompt {
+            system: init_checks_system_prompt(),
+            user: init_checks_user_prompt(prose, preferences),
+            temperature: Some(0.1),
+        })
+        .await?;
+
+    let plan = parse_init_checks_plan(&response)?;
+    Ok(ProjectConfig {
+        checks: plan
+            .checks
+            .into_iter()
+            .filter_map(normalize_init_check)
+            .take(5)
+            .collect(),
+    })
+}
+
+fn parse_init_checks_plan(response: &str) -> Result<InitChecksPlan> {
+    serde_json::from_str(strip_json_fence(response))
+        .context("failed to parse init checks JSON from LLM")
+}
+
+fn normalize_init_check(check: InitCheckPlanItem) -> Option<ProjectCheckConfig> {
+    let timeout_seconds = check.timeout_seconds.filter(|timeout| *timeout > 0)?;
+    let command = check
+        .command
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if command.is_empty() {
+        return None;
+    }
+
+    Some(ProjectCheckConfig {
+        command,
+        timeout_seconds,
+    })
+}
+
+fn write_generated_project_config(config: &ProjectConfig) -> Result<()> {
+    if config.checks.is_empty() {
+        return Ok(());
+    }
+
+    write_project_config(config)
+}
+
+fn init_checks_system_prompt() -> String {
+    r#"You create a project verification config for SpecForge.
+
+Return only JSON. Do not wrap it in Markdown fences. Do not include commentary.
+
+Infer the most appropriate local verification commands from the project idea and
+user-selected implementation preferences. Choose commands a developer can run
+from the repository root after code changes.
+
+Rules:
+- Return only checks that are relevant to the inferred stack.
+- Prefer standard test commands over broad build commands.
+- Include command arguments as separate array items.
+- Pick a practical timeout_seconds value for each command based on expected
+  project size and stack. Use a positive integer.
+- If the stack is unknown or no useful local check can be inferred, return
+  {"checks":[]}.
+
+JSON schema:
+{
+  "checks": [
+    {
+      "command": ["cargo", "test", "--color", "never"],
+      "timeout_seconds": 120
+    }
+  ]
+}"#
+    .to_string()
+}
+
+fn init_checks_user_prompt(prose: &str, preferences: &InitPreferences) -> String {
+    format!(
+        "Create the SpecForge project verification config for this project idea:\n\n<project-idea>\n{}\n</project-idea>\n\nUse these user-selected implementation preferences when they are provided:\n\n<init-preferences>\n{}\n</init-preferences>\n",
+        prose.trim(),
+        preferences.prompt_block()
+    )
 }
 
 fn init_questionnaire_system_prompt() -> String {
@@ -556,4 +682,46 @@ fn slugify(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_init_checks_plan_and_requires_timeout() {
+        let plan = parse_init_checks_plan(
+            r#"{
+                "checks": [
+                    {
+                        "command": ["cargo", "test", "--color", "never"],
+                        "timeout_seconds": 120
+                    },
+                    {
+                        "command": ["npm", "test"]
+                    }
+                ]
+            }"#,
+        )
+        .expect("checks plan should parse");
+
+        let checks = plan
+            .checks
+            .into_iter()
+            .filter_map(normalize_init_check)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            checks,
+            vec![ProjectCheckConfig {
+                command: vec![
+                    "cargo".to_string(),
+                    "test".to_string(),
+                    "--color".to_string(),
+                    "never".to_string()
+                ],
+                timeout_seconds: 120,
+            }]
+        );
+    }
 }
