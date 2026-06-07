@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rig::message::{Message, ToolCall};
+use rig::message::{AssistantContent, Message, ToolCall, ToolResult, UserContent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -448,6 +448,13 @@ pub async fn resume_pending_development_task_with_events(
         "Resuming execution task {}",
         task_dir.display()
     )));
+    let repaired_tool_results = repair_incomplete_tool_results(&mut thread)?;
+    if repaired_tool_results > 0 {
+        write_thread(&task_dir, &thread)?;
+        events(DevelopmentAgentEvent::Log(format!(
+            "Recovered {repaired_tool_results} incomplete tool result(s) from the previous run"
+        )));
+    }
 
     if state.status != TaskStatus::Completed {
         let completed = run_agent_loop(
@@ -712,6 +719,13 @@ async fn resume_pending_code_change_task_with_kind(
         "Resuming {task_label} task {}",
         task_dir.display()
     )));
+    let repaired_tool_results = repair_incomplete_tool_results(&mut thread)?;
+    if repaired_tool_results > 0 {
+        write_thread(&task_dir, &thread)?;
+        events(DevelopmentAgentEvent::Log(format!(
+            "Recovered {repaired_tool_results} incomplete tool result(s) from the previous run"
+        )));
+    }
 
     if state.status != TaskStatus::Completed {
         let completed = run_agent_loop(
@@ -806,24 +820,43 @@ async fn run_agent_loop(
             "Turn {step}: tool calls: {}",
             tool_call_names.join(", ")
         )));
-        for call in &tool_calls {
+        for (call_index, call) in tool_calls.iter().enumerate() {
             events(DevelopmentAgentEvent::ToolStarted {
                 name: call.function.name.clone(),
             });
-            let output = execute_tool(call, task_dir, state, context, patch_history, events)?;
+            let output = match execute_tool(call, task_dir, state, context, patch_history, events) {
+                Ok(output) => output,
+                Err(error) => {
+                    let output = json!({
+                        "ok": false,
+                        "error": format!("tool execution failed: {error:#}"),
+                    });
+                    events(DevelopmentAgentEvent::ToolFinished {
+                        name: call.function.name.clone(),
+                        ok: Some(false),
+                    });
+                    record_tool_result(task_dir, thread, call, &output)?;
+                    record_skipped_tool_results(
+                        task_dir,
+                        thread,
+                        tool_calls.iter().skip(call_index + 1),
+                        "a previous tool failed before this call could run",
+                    )?;
+                    return Err(error);
+                }
+            };
             events(DevelopmentAgentEvent::ToolFinished {
                 name: call.function.name.clone(),
                 ok: output.get("ok").and_then(Value::as_bool),
             });
-            let output_text =
-                serde_json::to_string(&output).context("failed to serialize tool output")?;
-            thread.messages.push(Message::tool_result_with_call_id(
-                call.id.clone(),
-                call.call_id.clone(),
-                output_text,
-            ));
-            write_thread(task_dir, thread)?;
+            record_tool_result(task_dir, thread, call, &output)?;
             if call.function.name == "propose_patch" {
+                record_skipped_tool_results(
+                    task_dir,
+                    thread,
+                    tool_calls.iter().skip(call_index + 1),
+                    "propose_patch ended this tool batch before this call could run",
+                )?;
                 break;
             }
         }
@@ -839,6 +872,89 @@ async fn run_agent_loop(
     }
 
     Ok(false)
+}
+
+fn record_tool_result(
+    task_dir: &Path,
+    thread: &mut AgentThread,
+    call: &ToolCall,
+    output: &Value,
+) -> Result<()> {
+    let output_text = serde_json::to_string(output).context("failed to serialize tool output")?;
+    thread.messages.push(Message::tool_result_with_call_id(
+        call.id.clone(),
+        call.call_id.clone(),
+        output_text,
+    ));
+    write_thread(task_dir, thread)
+}
+
+fn record_skipped_tool_results<'a>(
+    task_dir: &Path,
+    thread: &mut AgentThread,
+    calls: impl Iterator<Item = &'a ToolCall>,
+    reason: &str,
+) -> Result<()> {
+    for call in calls {
+        let output = json!({
+            "ok": false,
+            "error": reason,
+        });
+        record_tool_result(task_dir, thread, call, &output)?;
+    }
+
+    Ok(())
+}
+
+fn repair_incomplete_tool_results(thread: &mut AgentThread) -> Result<usize> {
+    let mut pending = Vec::new();
+    for message in &thread.messages {
+        match message {
+            Message::Assistant { content, .. } => {
+                pending.extend(content.iter().filter_map(|content| match content {
+                    AssistantContent::ToolCall(call) => Some(call.clone()),
+                    _ => None,
+                }));
+            }
+            Message::User { content } => {
+                for content in content.iter() {
+                    if let UserContent::ToolResult(result) = content {
+                        pending.retain(|call| !tool_result_matches_call(result, call));
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+
+    let repaired = pending.len();
+    for call in pending {
+        let output = json!({
+            "ok": false,
+            "error": format!(
+                "tool `{}` did not complete before the previous process exit",
+                call.function.name
+            ),
+        });
+        let output_text =
+            serde_json::to_string(&output).context("failed to serialize tool output")?;
+        thread.messages.push(Message::tool_result_with_call_id(
+            call.id,
+            call.call_id,
+            output_text,
+        ));
+    }
+
+    Ok(repaired)
+}
+
+fn tool_result_matches_call(result: &ToolResult, call: &ToolCall) -> bool {
+    result.id == call.id
+        || result
+            .call_id
+            .as_ref()
+            .zip(call.call_id.as_ref())
+            .is_some_and(|(result_call_id, call_call_id)| result_call_id == call_call_id)
 }
 
 fn finish_task(
@@ -1434,6 +1550,7 @@ mod tests {
         validate_apply_patch_with_protected_paths,
     };
     use super::*;
+    use rig::{OneOrMany, message::ToolFunction};
 
     #[test]
     fn rejects_paths_that_escape_repo() {
@@ -1583,5 +1700,51 @@ mod tests {
         assert_eq!(budget, AgentTurnBudget::Unbounded);
         assert_eq!(budget.as_state_value(), 0);
         assert!(!budget.exhausted_before_turn(usize::MAX));
+    }
+
+    #[test]
+    fn repairs_missing_tool_results_without_duplicates() {
+        let first = tool_call("tool-1", "call-1", "inspect_file");
+        let second = tool_call("tool-2", "call-2", "inspect_spec_item");
+        let mut thread = AgentThread {
+            messages: vec![
+                Message::user("start"),
+                Message::Assistant {
+                    id: None,
+                    content: OneOrMany::many(vec![
+                        AssistantContent::ToolCall(first.clone()),
+                        AssistantContent::ToolCall(second.clone()),
+                    ])
+                    .unwrap(),
+                },
+                Message::tool_result_with_call_id(
+                    first.id.clone(),
+                    first.call_id.clone(),
+                    r#"{"ok":true}"#,
+                ),
+            ],
+        };
+
+        assert_eq!(repair_incomplete_tool_results(&mut thread).unwrap(), 1);
+        assert_eq!(repair_incomplete_tool_results(&mut thread).unwrap(), 0);
+
+        let Some(Message::User { content }) = thread.messages.last() else {
+            panic!("expected repaired tool result");
+        };
+        assert!(content.iter().any(|content| {
+            matches!(
+                content,
+                UserContent::ToolResult(result)
+                    if result.id == "tool-2" && result.call_id.as_deref() == Some("call-2")
+            )
+        }));
+    }
+
+    fn tool_call(id: &str, call_id: &str, name: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolFunction::new(name.to_string(), json!({})),
+        )
+        .with_call_id(call_id.to_string())
     }
 }

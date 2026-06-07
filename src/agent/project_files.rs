@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -96,8 +97,15 @@ pub(super) fn inspect_file(
     let full_path = std::env::current_dir()
         .context("failed to read current directory")?
         .join(&path);
-    let source = fs::read_to_string(&full_path)
-        .with_context(|| format!("failed to read {}", full_path.display()))?;
+    let bytes =
+        fs::read(&full_path).with_context(|| format!("failed to read {}", full_path.display()))?;
+    let Ok(source) = String::from_utf8(bytes) else {
+        return Ok(json!({
+            "ok": false,
+            "error": "file is not valid UTF-8 text",
+            "path": path,
+        }));
+    };
     let lines = source
         .lines()
         .enumerate()
@@ -178,11 +186,28 @@ fn collect_project_files(
             if !file_access_allows_path(&relative, allowed_paths) {
                 continue;
             }
+            if !is_probably_text_file(&path)? {
+                continue;
+            }
             files.push(relative);
         }
     }
 
     Ok(())
+}
+
+fn is_probably_text_file(path: &Path) -> Result<bool> {
+    const SAMPLE_BYTES: usize = 8192;
+
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut buffer = [0; SAMPLE_BYTES];
+    let bytes_read = file
+        .read(&mut buffer)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let sample = &buffer[..bytes_read];
+
+    Ok(!sample.contains(&0) && std::str::from_utf8(sample).is_ok())
 }
 
 fn file_access_allows_path(path: &str, allowed_paths: &[String]) -> bool {
@@ -203,6 +228,7 @@ fn file_access_allows_path(path: &str, allowed_paths: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{env, process};
 
     #[test]
     fn empty_file_access_allows_any_path() {
@@ -237,5 +263,33 @@ mod tests {
             normalize_requested_path(Path::new("./src/lib.rs")),
             "src/lib.rs"
         );
+    }
+
+    #[test]
+    fn detects_probable_text_files() {
+        let path = env::temp_dir().join(format!(
+            "specforge-text-file-{}-{}.txt",
+            process::id(),
+            "text"
+        ));
+        fs::write(&path, "plain UTF-8 text\n").unwrap();
+
+        assert!(is_probably_text_file(&path).unwrap());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_binary_files_with_nul_bytes() {
+        let path = env::temp_dir().join(format!(
+            "specforge-binary-file-{}-{}.bin",
+            process::id(),
+            "binary"
+        ));
+        fs::write(&path, [0x7f, b'E', b'L', b'F', 0, 1, 2, 3]).unwrap();
+
+        assert!(!is_probably_text_file(&path).unwrap());
+
+        let _ = fs::remove_file(path);
     }
 }
